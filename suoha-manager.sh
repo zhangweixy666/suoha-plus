@@ -26,7 +26,11 @@ if [ ! -t 0 ]; then
     if [ -s "$_install_path" ]; then
         chmod +x "$_install_path" 2>/dev/null
         export SUOHA_TTY=1
-        exec bash "$_install_path"
+        if [ -r /dev/tty ]; then
+            exec bash "$_install_path" < /dev/tty
+        else
+            exec bash "$_install_path"
+        fi
     else
         echo "[错误] 管道模式下无法下载脚本副本，请改用：wget -qO /root/suoha-manager.sh <URL> && sh /root/suoha-manager.sh" >&2
         exit 1
