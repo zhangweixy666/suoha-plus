@@ -38,7 +38,7 @@ if [ ! -t 0 ]; then
 fi
 
 APP_NAME="suoha-plus"
-APP_VERSION="2.2.2"
+APP_VERSION="2.3.0"
 APP_DIR="/opt/suoha-plus"
 BIN_DIR="$APP_DIR/bin"
 LOG_DIR="$APP_DIR/logs"
@@ -225,6 +225,10 @@ validate_tunnel_name() {
 
 has_systemd() {
     [ -d /run/systemd/system ] && command_exists systemctl
+}
+
+has_openrc() {
+    ! has_systemd && command_exists rc-update && [ -d /etc/init.d ] && command_exists rc-service
 }
 
 install_dependencies() {
@@ -629,13 +633,16 @@ stop_pid() {
         rm -f "$file"
     fi
 }
-
 start_xray() {
     [ -x "$XRAY_BIN" ] || { err "Xray 尚未安装。"; return 1; }
     [ -f "$XRAY_CONFIG" ] || write_xray_config || return 1
     if [ "$MODE" = "persistent" ] && has_systemd; then
         systemctl start "$SERVICE_XRAY"
         return $?
+    fi
+    if [ "$MODE" = "persistent" ] && has_openrc; then
+        rc-service suoha-plus-xray start 2>/dev/null || return 1
+        return 0
     fi
     stop_pid "$XRAY_PID"
     nohup "$XRAY_BIN" run -config "$XRAY_CONFIG" >> "$XRAY_LOG" 2>&1 < /dev/null &
@@ -686,6 +693,10 @@ start_persistent_tunnel() {
         systemctl start "$SERVICE_CF"
         return $?
     fi
+    if has_openrc; then
+        rc-service suoha-plus-cloudflared start 2>/dev/null || return 1
+        return 0
+    fi
     stop_pid "$CF_PID"
     nohup "$CF_BIN" tunnel --config "$CF_CONFIG" run "$TUNNEL_NAME" >> "$CF_LOG" 2>&1 < /dev/null &
     echo $! > "$CF_PID"
@@ -702,6 +713,9 @@ stop_services() {
     if [ "$MODE" = "persistent" ] && has_systemd; then
         systemctl stop "$SERVICE_CF" 2>/dev/null || true
         systemctl stop "$SERVICE_XRAY" 2>/dev/null || true
+    elif [ "$MODE" = "persistent" ] && has_openrc; then
+        rc-service suoha-plus-cloudflared stop 2>/dev/null || true
+        rc-service suoha-plus-xray stop 2>/dev/null || true
     fi
     stop_pid "$CF_PID"
     stop_pid "$XRAY_PID"
@@ -782,11 +796,53 @@ EOF
     ok "已写入独立 systemd 服务：$SERVICE_XRAY、$SERVICE_CF"
 }
 
+install_openrc_units() {
+    has_openrc || return 0
+    mkdir -p /etc/init.d || return 1
+    OINIT_XRAY="/etc/init.d/suoha-plus-xray"
+    OINIT_CF="/etc/init.d/suoha-plus-cloudflared"
+    cat > "$OINIT_XRAY" <<EOF
+#!/sbin/openrc-run
+name="suoha-plus-xray"
+description="Suoha Plus Xray"
+command="$XRAY_BIN"
+command_args="run -config $XRAY_CONFIG"
+command_background="yes"
+pidfile="$XRAY_PID"
+output_log="$XRAY_LOG"
+error_log="$XRAY_LOG"
+depend() { need net; after firewall; }
+EOF
+    cat > "$OINIT_CF" <<EOF
+#!/sbin/openrc-run
+name="suoha-plus-cloudflared"
+description="Suoha Plus Cloudflare Tunnel"
+command="$CF_BIN"
+command_args="tunnel --config $CF_CONFIG run $TUNNEL_NAME"
+command_background="yes"
+pidfile="$CF_PID"
+output_log="$CF_LOG"
+error_log="$CF_LOG"
+depend() { need net; after firewall $OINIT_XRAY; }
+EOF
+    chmod 755 "$OINIT_XRAY" "$OINIT_CF"
+    rc-update add suoha-plus-xray default >/dev/null 2>&1 || true
+    rc-update add suoha-plus-cloudflared default >/dev/null 2>&1 || true
+    ok "已写入 OpenRC 服务：suoha-plus-xray、suoha-plus-cloudflared"
+}
+
 remove_systemd_units() {
     if has_systemd; then
         systemctl disable --now "$SERVICE_CF" "$SERVICE_XRAY" >/dev/null 2>&1 || true
         rm -f "/etc/systemd/system/$SERVICE_CF" "/etc/systemd/system/$SERVICE_XRAY"
         systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+    if has_openrc; then
+        rc-service suoha-plus-cloudflared stop 2>/dev/null || true
+        rc-service suoha-plus-xray stop 2>/dev/null || true
+        rc-update del suoha-plus-cloudflared default >/dev/null 2>&1 || true
+        rc-update del suoha-plus-xray default >/dev/null 2>&1 || true
+        rm -f "/etc/init.d/suoha-plus-cloudflared" "/etc/init.d/suoha-plus-xray"
     fi
 }
 
@@ -1021,6 +1077,7 @@ setup_persistent() {
     write_cloudflared_config || return 1
     save_state
     install_systemd_units || return 1
+    install_openrc_units || return 1
     start_xray || return 1
     start_persistent_tunnel || return 1
     save_state
