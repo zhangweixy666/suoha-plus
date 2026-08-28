@@ -636,11 +636,12 @@ stop_pid() {
 start_xray() {
     [ -x "$XRAY_BIN" ] || { err "Xray 尚未安装。"; return 1; }
     [ -f "$XRAY_CONFIG" ] || write_xray_config || return 1
-    if [ "$MODE" = "persistent" ] && has_systemd; then
+    # 只要存在服务单元（systemd/OpenRC）就由 init 管理，避免 nohup 双实例
+    if has_systemd && { [ "$MODE" = "persistent" ] || [ -f "/etc/systemd/system/$SERVICE_XRAY" ]; }; then
         systemctl start "$SERVICE_XRAY"
         return $?
     fi
-    if [ "$MODE" = "persistent" ] && has_openrc; then
+    if has_openrc && { [ "$MODE" = "persistent" ] || [ -f "/etc/init.d/suoha-plus-xray" ]; }; then
         rc-service suoha-plus-xray start 2>/dev/null || return 1
         return 0
     fi
@@ -689,11 +690,12 @@ start_persistent_tunnel() {
         return 0
     fi
     [ -f "$CF_CONFIG" ] || write_cloudflared_config || return 1
-    if has_systemd; then
+    # 单元存在则走 init 管理
+    if has_systemd && { [ -f "/etc/systemd/system/$SERVICE_CF" ] || [ "$MODE" = "persistent" ]; }; then
         systemctl start "$SERVICE_CF"
         return $?
     fi
-    if has_openrc; then
+    if has_openrc && { [ -f "/etc/init.d/suoha-plus-cloudflared" ] || [ "$MODE" = "persistent" ]; }; then
         rc-service suoha-plus-cloudflared start 2>/dev/null || return 1
         return 0
     fi
@@ -768,12 +770,14 @@ After=network-online.target
 Type=simple
 WorkingDirectory=$APP_DIR
 ExecStart=$XRAY_BIN run -config $XRAY_CONFIG
-Restart=on-failure
+Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
+    # Quick 模式隧道无持久配置/单元，跳过 CF 单元
+    if [ "$MODE" != "quick" ] && { [ "$MODE" = "persistent" ] || [ -f "$CF_CONFIG" ]; }; then
     cat > "/etc/systemd/system/$SERVICE_CF" <<EOF
 [Unit]
 Description=Suoha Plus Cloudflare Tunnel
@@ -784,16 +788,20 @@ After=network-online.target $SERVICE_XRAY
 Type=simple
 WorkingDirectory=$APP_DIR
 ExecStart=$CF_BIN tunnel --config $CF_CONFIG run $TUNNEL_NAME
-Restart=on-failure
+Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
-    chmod 644 "/etc/systemd/system/$SERVICE_XRAY" "/etc/systemd/system/$SERVICE_CF"
+    fi
+    chmod 644 "/etc/systemd/system/$SERVICE_XRAY" 2>/dev/null
+    [ -f "/etc/systemd/system/$SERVICE_CF" ] && chmod 644 "/etc/systemd/system/$SERVICE_CF"
     systemctl daemon-reload
-    systemctl enable "$SERVICE_XRAY" "$SERVICE_CF" >/dev/null
-    ok "已写入独立 systemd 服务：$SERVICE_XRAY、$SERVICE_CF"
+    systemctl enable "$SERVICE_XRAY" >/dev/null
+    [ -f "/etc/systemd/system/$SERVICE_CF" ] && systemctl enable "$SERVICE_CF" >/dev/null
+    ok "已写入独立 systemd 服务：$SERVICE_XRAY"
+    [ -f "/etc/systemd/system/$SERVICE_CF" ] && ok "已写入独立 systemd 服务：$SERVICE_CF"
 }
 
 install_openrc_units() {
@@ -801,34 +809,56 @@ install_openrc_units() {
     mkdir -p /etc/init.d || return 1
     OINIT_XRAY="/etc/init.d/suoha-plus-xray"
     OINIT_CF="/etc/init.d/suoha-plus-cloudflared"
+    # wrapper 脚本：让 supervise-daemon 只监督一个简单命令，避免 command_args 瑕疵导致监督失效
+    cat > /usr/local/bin/suoha-xray-daemon.sh <<DAEMON
+#!/bin/sh
+exec $XRAY_BIN run -config $XRAY_CONFIG >> $XRAY_LOG 2>&1
+DAEMON
+    chmod +x /usr/local/bin/suoha-xray-daemon.sh
+    cat > /usr/local/bin/suoha-cloudflared-daemon.sh <<DAEMON
+#!/bin/sh
+exec $CF_BIN tunnel --config $CF_CONFIG run $TUNNEL_NAME >> $CF_LOG 2>&1
+DAEMON
+    chmod +x /usr/local/bin/suoha-cloudflared-daemon.sh
     cat > "$OINIT_XRAY" <<EOF
 #!/sbin/openrc-run
 name="suoha-plus-xray"
 description="Suoha Plus Xray"
-command="$XRAY_BIN"
-command_args="run -config $XRAY_CONFIG"
+supervisor=supervise-daemon
+command="/usr/local/bin/suoha-xray-daemon.sh"
 command_background="yes"
 pidfile="$XRAY_PID"
 output_log="$XRAY_LOG"
 error_log="$XRAY_LOG"
+respawn_delay=5
+respawn_max=0
 depend() { need net; after firewall; }
 EOF
     cat > "$OINIT_CF" <<EOF
 #!/sbin/openrc-run
 name="suoha-plus-cloudflared"
 description="Suoha Plus Cloudflare Tunnel"
-command="$CF_BIN"
-command_args="tunnel --config $CF_CONFIG run $TUNNEL_NAME"
+supervisor=supervise-daemon
+command="/usr/local/bin/suoha-cloudflared-daemon.sh"
 command_background="yes"
 pidfile="$CF_PID"
 output_log="$CF_LOG"
 error_log="$CF_LOG"
+respawn_delay=5
+respawn_max=0
 depend() { need net; after firewall $OINIT_XRAY; }
 EOF
-    chmod 755 "$OINIT_XRAY" "$OINIT_CF"
+    chmod 755 "$OINIT_XRAY"
     rc-update add suoha-plus-xray default >/dev/null 2>&1 || true
-    rc-update add suoha-plus-cloudflared default >/dev/null 2>&1 || true
-    ok "已写入 OpenRC 服务：suoha-plus-xray、suoha-plus-cloudflared"
+    # Quick 模式隧道无持久配置/单元，跳过 CF 单元
+    if [ "$MODE" != "quick" ] && { [ "$MODE" = "persistent" ] || [ -f "$CF_CONFIG" ]; }; then
+        chmod 755 "$OINIT_CF"
+        rc-update add suoha-plus-cloudflared default >/dev/null 2>&1 || true
+    else
+        rm -f "$OINIT_CF" /usr/local/bin/suoha-cloudflared-daemon.sh
+    fi
+    ok "已写入 OpenRC 服务：suoha-plus-xray"
+    [ -f "$OINIT_CF" ] && ok "已写入 OpenRC 服务：suoha-plus-cloudflared"
 }
 
 remove_systemd_units() {
@@ -843,6 +873,7 @@ remove_systemd_units() {
         rc-update del suoha-plus-cloudflared default >/dev/null 2>&1 || true
         rc-update del suoha-plus-xray default >/dev/null 2>&1 || true
         rm -f "/etc/init.d/suoha-plus-cloudflared" "/etc/init.d/suoha-plus-xray"
+        rm -f /usr/local/bin/suoha-xray-daemon.sh /usr/local/bin/suoha-cloudflared-daemon.sh
     fi
 }
 
@@ -997,6 +1028,9 @@ setup_reality() {
     mkdir -p "$APP_DIR" "$LOG_DIR" "$TMP_DIR"
     write_xray_config || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; return 1; }
     save_state
+    # 开机自启 + 崩溃拉起：Reality 模式也安装服务单元（systemd/OpenRC）
+    install_systemd_units || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; return 1; }
+    install_openrc_units || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; return 1; }
     start_xray || return 1
     save_state
     generate_nodes
@@ -1044,6 +1078,9 @@ setup_quick() {
     mkdir -p "$APP_DIR" "$LOG_DIR" "$TMP_DIR"
     write_xray_config || return 1
     save_state
+    # xray 安装服务单元（自启 + 崩溃拉起）；Quick 隧道地址重启会变，保持 nohup
+    install_systemd_units || { MODE="$old_mode"; return 1; }
+    install_openrc_units || { MODE="$old_mode"; return 1; }
     start_xray || return 1
     start_quick_tunnel || return 1
     save_state
@@ -1451,6 +1488,14 @@ EOF
 
 sq_write_service() {
     if has_systemd; then
+        # systemd 版也使用 wrapper 脚本（与 OpenRC 共用），避免 ExecStart 中 $() 被 systemd 拆解
+        cat > /usr/local/bin/suoha-quic-daemon.sh <<'DAEMON'
+#!/bin/sh
+MODE=$(cat /etc/shadowquic/last-mode 2>/dev/null || echo "direct")
+CONF="/etc/shadowquic/server-${MODE}.yaml"
+exec /usr/local/bin/shadowquic -c "$CONF" >> /var/log/suoha-sq.log 2>&1
+DAEMON
+        chmod +x /usr/local/bin/suoha-quic-daemon.sh
         cat > "$SQ_UNIT" <<EOF
 [Unit]
 Description=Suoha Plus ShadowQuic (QUIC proxy with SNI camouflage)
@@ -1459,7 +1504,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$SQ_BIN -c $SQ_APP_DIR/server-\$(cat $SQ_APP_DIR/last-mode 2>/dev/null || echo direct).yaml
+ExecStart=/usr/local/bin/suoha-quic-daemon.sh
 WorkingDirectory=$SQ_APP_DIR
 Restart=always
 RestartSec=5
@@ -1474,6 +1519,7 @@ EOF
         cat > "$SQ_INIT" <<'OPENRC'
 #!/sbin/openrc-run
 name="Suoha-ShadowQuic"
+supervisor=supervise-daemon
 command="/usr/local/bin/suoha-quic-daemon.sh"
 pidfile="/run/suoha-shadowquic.pid"
 respawn_delay=5
