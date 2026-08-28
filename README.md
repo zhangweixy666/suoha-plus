@@ -36,6 +36,7 @@ curl https://suoha.psai.eu.org/suoha.sh -o suoha.sh && chmod +x suoha.sh && bash
   - 已有旧 shadowquic 安装会被自动接管（停旧服务、移除旧注册、复用配置目录）
   - 生成 **sq:// 分享链接**（IPv4/IPv6 双栈）+ Clash.Meta/mihomo + 官方客户端配置
 - Reality 与 WS+隧道可**双节点共存**：一次安装，两条链路互为备份
+- **OpenRC 开机自启**（Alpine）：安装持久化隧道时自动注册 `suoha-plus-xray`、`suoha-plus-cloudflared` 到 rc-update default，重启自动拉起（systemd 环境对应 systemd 服务）
 - 自动生成 vless:// / vmess:// 分享链接，v2rayN / v2rayNG / Clash Meta 可直接导入
 - **运行状态显示**：主菜单实时 `● 运行中 / ○ 未运行`（含 PID）
 - **健康检测**：服务在线时自动实测 Reality 端口监听、隧道域名 WS 链路
@@ -242,6 +243,8 @@ Xray：菜单 5→4 编辑保存即自动校验重启；ShadowQuic：菜单 5→
 ShadowQuic 在菜单 `8 → 7` 单独卸载。
 
 ## 📜 版本
+- **v2.3.0**：新增 OpenRC 开机自启支持（Alpine：xray 与云flared 名为 suoha-plus-xray / suoha-plus-cloudflared 的服务自动注册 rc-update default，重启后自动拉起，崩溃自动重启）；修复无 systemd 时后台进程方式无自启的问题；支持卸载时清理 OpenRC 注册
+
 - **v2.2.2**：重装持久化隧道时支持「删除全部 Cloudflare 配置并重新登录」（自动删除账号上的同名旧隧道与本地授权凭据后重新 login）；账号上已有同名隧道但本地凭据缺失时自动删除重建，不再报凭据错误
 
 - **v2.2.1**：ShadowQuic 生成 `sq://` 分享链接（IPv4/IPv6，alpn/mtu/sni/udp_mode/zero_rtt 参数齐全）并写入节点文件；主菜单显示配置文件位置；新增手动编辑配置功能（vi/vim/nano，保存自动校验重启）；README 标明脚本来源
