@@ -202,7 +202,7 @@ validate_common() {
     fi
 
     case "$NODE_ADDRESS" in
-        ""|*[!A-Za-z0-9._:-]*) err "节点地址只能包含域名、IPv4、IPv6 和端口所需字符。"; return 1 ;;
+        ""|*[!A-Za-z0-9._:\[\]-]*) err "节点地址只能包含域名、IPv4、IPv6（[方括号]）和端口所需字符。"; return 1 ;;
     esac
 }
 
@@ -369,7 +369,6 @@ write_xray_config() {
   "log": { "loglevel": "warning" },
   "inbounds": [
     {
-      "listen": "0.0.0.0",
       "port": $REALITY_PORT,
       "protocol": "vless",
       "settings": {
@@ -515,21 +514,30 @@ current_tunnel_host() {
 
 generate_nodes() {
     mkdir -p "$APP_DIR" || return 1
-    local host label tmp json path_q
+    local host label tmp json path_q ip4 ip6
     host="$(current_tunnel_host)"
     label="$(url_label "$ISP_TAG")"
+    ip4="$(public_ip 2>/dev/null || true)"
+    ip6="$(public_ip6 2>/dev/null || true)"
+    ip6="${ip6#[}"
     tmp="$(mktemp "$APP_DIR/v2ray.txt.XXXXXX")" || return 1
     {
         printf '# Suoha Plus 节点信息（自动生成，请勿手动编辑）\n'
         printf '# Xray %s | cloudflared %s\n' "$XRAY_VERSION" "$CLOUDFLARED_VERSION"
         if [ "$REALITY_ENABLED" = "yes" ]; then
-            printf '# Reality 直连节点 | 端口：%s | SNI：%s\n\n' "$REALITY_PORT" "$REALITY_SNI"
-            printf 'vless://%s@%s:%s?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s_reality\n' "$UUID" "$NODE_ADDRESS" "$REALITY_PORT" "$REALITY_SNI" "$REALITY_PUBLIC" "$REALITY_SHORT_ID" "$label"
+            printf '# Reality 直连节点 | 端口：%s | SNI：%s | 同时监听 IPv4 + IPv6\n\n' "$REALITY_PORT" "$REALITY_SNI"
+            if [ -n "$ip4" ]; then
+                printf 'vless://%s@%s:%s?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s_reality_v4\n' "$UUID" "$ip4" "$REALITY_PORT" "$REALITY_SNI" "$REALITY_PUBLIC" "$REALITY_SHORT_ID" "$label"
+            fi
+            if [ -n "$ip6" ]; then
+                printf 'vless://%s@[%s]:%s?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s_reality_v6\n' "$UUID" "$ip6" "$REALITY_PORT" "$REALITY_SNI" "$REALITY_PUBLIC" "$REALITY_SHORT_ID" "$label"
+            fi
             printf '\n# 提示：Reality 为 VPS 直连，无需域名/隧道/优选；fp 也可试 ios、safari\n'
+            printf '# IPv4/IPv6 两条链接二选一：有 v6 用 v6（NAT 机器端口全开），只有 v4 用 v4\n'
             if [ -n "$host" ]; then
                 path_q="$(printf '%s' "$WS_PATH" | sed 's/%/%25/g; s#/#%2F#g')"
                 printf '\n# —— WS+隧道节点（与 Reality 共存，域名固定）——\n\n'
-                printf 'vless://%s@%s:443?encryption=none&security=tls&sni=%s&type=ws&host=%s&path=%s#%s_tls\n' "$UUID" "$NODE_ADDRESS" "$host" "$host" "$path_q" "$label"
+                printf 'vless://%s@%s:443?encryption=none&security=tls&sni=%s&type=ws&host=%s&path=%s#%s_tls\n' "$UUID" "$host" "$host" "$host" "$path_q" "$label"
                 printf '\n# TLS 端口可尝试：443、2053、2083、2087、2096、8443\n'
                 printf 'vless://%s@%s:80?encryption=none&security=none&type=ws&host=%s&path=%s#%s\n' "$UUID" "$NODE_ADDRESS" "$host" "$path_q" "$label"
                 printf '# 明文端口可尝试：80、8080、8880、2052、2082、2086、2095\n'
