@@ -243,7 +243,7 @@ Xray：菜单 5→4 编辑保存即自动校验重启；ShadowQuic：菜单 5→
 ShadowQuic 在菜单 `8 → 7` 单独卸载。
 
 ## 📜 版本
-- **v2.3.0**：新增 OpenRC 开机自启支持（Alpine：xray 与云flared 名为 suoha-plus-xray / suoha-plus-cloudflared 的服务自动注册 rc-update default，重启后自动拉起，崩溃自动重启）；修复无 systemd 时后台进程方式无自启的问题；支持卸载时清理 OpenRC 注册
+- **v2.3.0**：新增 OpenRC 开机自启支持（Alpine：xray 与 cloudflared 名为 suoha-plus-xray / suoha-plus-cloudflared 的服务自动注册 rc-update default，重启后自动拉起，崩溃自动重启）；修复无 systemd 时后台进程方式无自启的问题；支持卸载时清理 OpenRC 注册
 
 - **v2.2.2**：重装持久化隧道时支持「删除全部 Cloudflare 配置并重新登录」（自动删除账号上的同名旧隧道与本地授权凭据后重新 login）；账号上已有同名隧道但本地凭据缺失时自动删除重建，不再报凭据错误
 
