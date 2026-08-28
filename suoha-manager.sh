@@ -38,7 +38,7 @@ if [ ! -t 0 ]; then
 fi
 
 APP_NAME="suoha-plus"
-APP_VERSION="2.1.0"
+APP_VERSION="2.2.1"
 APP_DIR="/opt/suoha-plus"
 BIN_DIR="$APP_DIR/bin"
 LOG_DIR="$APP_DIR/logs"
@@ -564,6 +564,25 @@ generate_nodes() {
     } > "$tmp"
     chmod 600 "$tmp"
     mv -f "$tmp" "$NODE_FILE"
+    # ShadowQuic 链接追加到节点文件
+    if [ -f "$SQ_APP_DIR/server-direct.yaml" ]; then
+        local sq_u sq_p sq_host sq_label
+        sq_u="$(sed -n 's/.*username: "\([^"]*\)".*/\1/p' "$SQ_APP_DIR/server-direct.yaml" 2>/dev/null | head -1)"
+        sq_p="$(sed -n 's/.*password: "\([^"]*\)".*/\1/p' "$SQ_APP_DIR/server-direct.yaml" 2>/dev/null | head -1)"
+        sq_host="$(sed -n 's/.*server-name: "\([^"]*\)".*/\1/p' "$SQ_APP_DIR/server-direct.yaml" 2>/dev/null | head -1)"
+        sq_label="$(url_label "${ISP_TAG}_sq")"
+        {
+            printf '\n# —— ShadowQuic 节点（UDP :%s，sq:// 部分客户端支持）——\n\n' "$SQ_PORT"
+            if [ -n "$(public_ip 2>/dev/null)" ]; then
+                printf 'sq://%s:%s@%s:%s?alpn=h3&mtu=1280&sni=%s&udp_mode=datagram&zero_rtt=true#%s_v4\n' "$sq_u" "$sq_p" "$(public_ip)" "$SQ_PORT" "$sq_host" "$sq_label"
+            fi
+            local sq6; sq6="$(public_ip6 2>/dev/null)"; sq6="${sq6#[}"
+            if [ -n "$sq6" ]; then
+                printf 'sq://%s:%s@[%s]:%s?alpn=h3&mtu=1280&sni=%s&udp_mode=datagram&zero_rtt=true#%s_v6\n' "$sq_u" "$sq_p" "$sq6" "$SQ_PORT" "$sq_host" "$sq_label"
+            fi
+            printf '\n# ShadowQuic 配置：/etc/shadowquic/server-direct.yaml（直连出站）/ server-socks.yaml（SOCKS出站）/ last-mode\n'
+        } >> "$NODE_FILE"
+    fi
 }
 
 print_nodes() {
@@ -572,6 +591,27 @@ print_nodes() {
     cat "$NODE_FILE"
     say "${C_GREEN}──────────────────────────────${C_RESET}"
     info "节点文件：$NODE_FILE"
+    # ShadowQuic sq:// 分享链接（部分客户端支持）
+    if [ -f "$SQ_APP_DIR/server-direct.yaml" ]; then
+        local sq_u sq_p sq_host sq_label
+        sq_u="$(sed -n 's/.*username: "\([^"]*\)".*/\1/p' "$SQ_APP_DIR/server-direct.yaml" 2>/dev/null | head -1)"
+        sq_p="$(sed -n 's/.*password: "\([^"]*\)".*/\1/p' "$SQ_APP_DIR/server-direct.yaml" 2>/dev/null | head -1)"
+        sq_host="$(sed -n 's/.*server-name: "\([^"]*\)".*/\1/p' "$SQ_APP_DIR/server-direct.yaml" 2>/dev/null | head -1)"
+        sq_label="$(url_label "${ISP_TAG}_sq")"
+        say ""
+        say "${C_CYAN}—— ShadowQuic 节点（sq:// 分享链接，部分客户端支持）——${C_RESET}"
+        local sq_v4 sq_v6
+        sq_v4="$(public_ip 2>/dev/null || true)"
+        sq_v6="$(public_ip6 2>/dev/null || true)"
+        sq_v6="${sq_v6#[}"
+        if [ -n "$sq_v4" ]; then
+            printf 'sq://%s:%s@%s:%s?alpn=h3&mtu=1280&sni=%s&udp_mode=datagram&zero_rtt=true#%s_v4\n' "$sq_u" "$sq_p" "$sq_v4" "$SQ_PORT" "$sq_host" "$sq_label"
+        fi
+        if [ -n "$sq_v6" ]; then
+            printf 'sq://%s:%s@[%s]:%s?alpn=h3&mtu=1280&sni=%s&udp_mode=datagram&zero_rtt=true#%s_v6\n' "$sq_u" "$sq_p" "$sq_v6" "$SQ_PORT" "$sq_host" "$sq_label"
+        fi
+        say "配置文件：$SQ_APP_DIR/server-direct.yaml（直连出站） / $SQ_APP_DIR/server-socks.yaml（SOCKS出站）"
+    fi
 }
 
 pid_running() { [ -r "$1" ] && kill -0 "$(cat "$1" 2>/dev/null)" 2>/dev/null; }
@@ -975,6 +1015,8 @@ show_config() {
     [ "$MODE" = "quick" ] && printf 'Quick 地址    : %s\n' "${QUICK_URL:-未启动}"
     [ "$MODE" = "persistent" ] && printf '绑定域名      : %s\nTunnel 名称   : %s\nTunnel ID     : %s\n' "$DOMAIN" "$TUNNEL_NAME" "$TUNNEL_ID"
     printf '节点文件      : %s\n' "$NODE_FILE"
+    printf '配置位置      : %s | %s\n' "$XRAY_CONFIG" "${QUICK_URL:+$CF_CONFIG}"
+    [ -f "$SQ_APP_DIR/server-direct.yaml" ] && printf '                ShadowQuic: %s（手动编辑后用菜单8重启生效）\n' "$SQ_APP_DIR/server-direct.yaml"
 }
 
 status_line() {
@@ -1045,6 +1087,7 @@ config_menu() {
         say '1) 修改 Xray 配置（立即校验、重启并刷新节点）'
         say '2) 修改隧道配置（立即应用并刷新节点）'
         say '3) 重新生成节点信息'
+        say '4) 手动编辑配置文件（vi/vim，保存后自动校验重启生效）'
         say '0) 返回主菜单'
         read -r -p '请选择: ' menu
         case "$menu" in
@@ -1067,10 +1110,53 @@ config_menu() {
             3)
                 save_state; generate_nodes; print_nodes; pause_screen
                 ;;
+            4)
+                manual_edit_config
+                pause_screen
+                ;;
             0|'') return 0 ;;
             *) warn '无效选项。'; sleep 1 ;;
         esac
     done
+}
+
+manual_edit_config() {
+    local editor
+    editor="$(command -v vi || command -v vim || command -v nano || true)"
+    [ -n "$editor" ] || { err '未找到 vi/vim/nano 编辑器。'; return 1; }
+    say "${C_CYAN}当前配置文件位置：${C_RESET}"
+    say "  Xray 配置      : $XRAY_CONFIG"
+    [ -f "$CF_CONFIG" ] && say "  隧道配置       : $CF_CONFIG"
+    [ -f "$SQ_APP_DIR/server-direct.yaml" ] && say "  ShadowQuic 配置: $SQ_APP_DIR/server-direct.yaml（direct=直连出站）/ $SQ_APP_DIR/server-socks.yaml（socks出站）"
+    say "  ShadowQuic 模式: $SQ_APP_DIR/last-mode（direct/socks）"
+    say ""
+    say '  1) 编辑 Xray 配置'
+    say '  2) 编辑隧道配置'
+    say '  3) 编辑 ShadowQuic 直连出站配置'
+    say '  4) 编辑 ShadowQuic SOCKS 出站配置'
+    say '  5) 切换 ShadowQuic 出站模式（direct/socks）'
+    say '  0) 返回'
+    read -r -p '请选择: ' m
+    local sq_file
+    case "${m:-0}" in
+        1) "$editor" "$XRAY_CONFIG" && apply_config_now || true ;;
+        2) [ -f "$CF_CONFIG" ] && "$editor" "$CF_CONFIG" && restart_services || warn '隧道配置文件不存在（Quick 模式自动生成）。' ;;
+        3) [ -f "$SQ_APP_DIR/server-direct.yaml" ] && "$editor" "$SQ_APP_DIR/server-direct.yaml" && sq_start || warn 'ShadowQuic 尚未安装。' ;;
+        4) [ -f "$SQ_APP_DIR/server-socks.yaml" ] && "$editor" "$SQ_APP_DIR/server-socks.yaml" || warn 'ShadowQuic 尚未安装。' ;;
+        5)
+            read -r -p "当前模式：$(cat "$SQ_APP_DIR/last-mode" 2>/dev/null || echo direct)，切换到 [direct/socks]: " mm
+            case "$mm" in
+                direct|socks)
+                    echo "$mm" > "$SQ_APP_DIR/last-mode"
+                    sq_start
+                    sq_status_line
+                    ;;
+                *) warn '无效模式。' ;;
+            esac
+            ;;
+        0|'') return 0 ;;
+        *) warn '无效选项。' ;;
+    esac
 }
 
 uninstall_plus() {
