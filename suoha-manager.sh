@@ -1173,8 +1173,11 @@ case "${1:-}" in
         cat <<EOF
 用法：sudo bash $0
 
-Suoha Plus 是原 suoha.sh 的独立增强版：
+Suoha Plus 是原 suoha.sh 的独立增强版（v$APP_VERSION）：
 - 固定 Xray $XRAY_VERSION 和 cloudflared $CLOUDFLARED_VERSION，不使用 latest；
+- 三种模式：Quick Tunnel / 持久化 Tunnel / Reality 直连节点（vless+XTLS Vision）；
+- Reality 模式：免域名免隧道，自动生成密钥，IPv4/IPv6 双栈节点链接，可与 WS 隧道共存；
+- WS 模式默认优选接入域名 www.visa.com（大厂自有域名，解析到 Cloudflare 边缘）；
 - 修改 Xray / Tunnel 配置后自动校验、重启并重新生成节点；
 - 使用独立目录 $APP_DIR、独立服务名和命令 $CMD_LINK；
 - 不删除或覆盖原 suoha.sh。
