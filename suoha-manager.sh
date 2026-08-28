@@ -391,6 +391,19 @@ write_xray_config() {
         "destOverride": [ "http", "tls", "quic" ],
         "routeOnly": true
       }
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": $XRAY_PORT,
+      "protocol": "vless",
+      "settings": {
+        "decryption": "none",
+        "clients": [ { "id": "$UUID" } ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": { "path": "$WS_PATH" }
+      }
     }
   ],
   "outbounds": [ { "protocol": "freedom", "settings": {} } ]
