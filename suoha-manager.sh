@@ -59,6 +59,7 @@ SERVICE_CF="suoha-plus-cloudflared.service"
 
 XRAY_VERSION="v26.3.27"
 CLOUDFLARED_VERSION="2026.8.2"
+SQ_PORT="1443"
 XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download/$XRAY_VERSION"
 CF_RELEASE_BASE="https://github.com/cloudflare/cloudflared/releases/download/$CLOUDFLARED_VERSION"
 
@@ -169,6 +170,7 @@ save_state() {
         printf 'WS_PATH=%q\n' "$WS_PATH"
         printf 'XRAY_PORT=%q\n' "$XRAY_PORT"
         printf 'QUICK_URL=%q\n' "$QUICK_URL"
+        printf 'SQ_PORT=%q\n' "$SQ_PORT"
         printf 'DOMAIN=%q\n' "$DOMAIN"
         printf 'TUNNEL_NAME=%q\n' "$TUNNEL_NAME"
         printf 'TUNNEL_ID=%q\n' "$TUNNEL_ID"
@@ -1030,6 +1032,7 @@ show_status() {
     status_line "Xray" "$SERVICE_XRAY" "$XRAY_PID"
     status_line "Cloudflare Tunnel" "$SERVICE_CF" "$CF_PID"
     health_check
+    sq_status_line
     printf 'Xray 日志      : %s\n' "$XRAY_LOG"
     printf 'Tunnel 日志    : %s\n' "$CF_LOG"
 }
@@ -1186,6 +1189,325 @@ service_menu() {
     done
 }
 
+# ---------- ShadowQuic 模块（移植自 warp- 项目，不依赖 WARP/sing-box） ----------
+SQ_VERSION_FALLBACK="v0.3.12"
+SQ_APP_DIR="/etc/shadowquic"
+SQ_BIN="/usr/local/bin/shadowquic"
+SQ_LOG="/var/log/suoha-sq.log"
+SQ_UNIT="/etc/systemd/system/suoha-shadowquic.service"
+SQ_INIT="/etc/init.d/suoha-shadowquic"
+SQ_CMD="/usr/local/bin/suoha-quic"
+
+sq_installed() { [ -x "$SQ_BIN" ]; }
+
+sq_detect_service() {
+    # 返回 "systemd" / "openrc" / "manual"，同时识别旧的 shadowquic 服务名（兼容接管）
+    if has_systemd && { [ -f "$SQ_UNIT" ] || [ -f /etc/systemd/system/shadowquic.service ] || ls /lib/systemd/system/shadowquic* >/dev/null 2>&1; }; then
+        printf 'systemd'
+    elif [ -f /etc/init.d/shadowquic ] || [ -f "$SQ_INIT" ]; then
+        rc-update add suoha-shadowquic default >/dev/null 2>&1 || true
+        printf 'openrc'
+    elif has_systemd; then
+        printf 'systemd'
+    else
+        printf 'manual'
+    fi
+}
+
+sq_random() {
+    head -c 32 /dev/urandom | base64 | tr -d '=+/' | cut -c1-"$1"
+}
+
+sq_write_configs() {
+    local u="$1" p="$2" sq_sn="$3" sq_up="$4"
+    mkdir -p "$SQ_APP_DIR"
+    cat > "$SQ_APP_DIR/server-direct.yaml" <<EOF
+inbound:
+  type: shadowquic
+  bind-addr: "[::]:$SQ_PORT"
+  users:
+    - username: "$u"
+      password: "$p"
+  server-name: "$sq_sn"
+  jls-upstream:
+    addr: "$sq_up"
+    rate-limit: 1000000
+  alpn: ["h3"]
+  zero-rtt: true
+  congestion-control: bbr
+  gso: true
+  mtu-discovery: true
+  blackhole-detection: false
+  initial-mtu: 1300
+  min-mtu: 1200
+outbound:
+  type: direct
+  dns-strategy: prefer-ipv4
+log-level: warn
+EOF
+    cat > "$SQ_APP_DIR/server-socks.yaml" <<EOF
+inbound:
+  type: shadowquic
+  bind-addr: "[::]:$SQ_PORT"
+  users:
+    - username: "$u"
+      password: "$p"
+  server-name: "$sq_sn"
+  jls-upstream:
+    addr: "$sq_up"
+    rate-limit: 1000000
+  alpn: ["h3"]
+  zero-rtt: true
+  congestion-control: bbr
+  gso: true
+  mtu-discovery: true
+  blackhole-detection: false
+  initial-mtu: 1300
+  min-mtu: 1200
+outbound:
+  type: socks
+  addr: "127.0.0.1:1080"
+log-level: warn
+EOF
+    echo direct > "$SQ_APP_DIR/last-mode"
+}
+
+sq_write_service() {
+    if has_systemd; then
+        cat > "$SQ_UNIT" <<EOF
+[Unit]
+Description=Suoha Plus ShadowQuic (QUIC proxy with SNI camouflage)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$SQ_BIN -c $SQ_APP_DIR/server-\$(cat $SQ_APP_DIR/last-mode 2>/dev/null || echo direct).yaml
+WorkingDirectory=$SQ_APP_DIR
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl enable suoha-shadowquic >/dev/null 2>&1 || true
+    else
+        cat > "$SQ_INIT" <<'OPENRC'
+#!/sbin/openrc-run
+name="Suoha-ShadowQuic"
+command="/usr/local/bin/suoha-quic-daemon.sh"
+pidfile="/run/suoha-shadowquic.pid"
+respawn_delay=5
+respawn_max=0
+output_log="/var/log/suoha-sq.log"
+error_log="/var/log/suoha-sq.log"
+OPENRC
+        chmod +x "$SQ_INIT"
+        rc-update add suoha-shadowquic default >/dev/null 2>&1 || true
+        cat > /usr/local/bin/suoha-quic-daemon.sh <<'DAEMON'
+#!/bin/sh
+MODE=$(cat /etc/shadowquic/last-mode 2>/dev/null || echo "direct")
+CONF="/etc/shadowquic/server-${MODE}.yaml"
+exec /usr/local/bin/shadowquic -c "$CONF" >> /var/log/suoha-sq.log 2>&1
+DAEMON
+        chmod +x /usr/local/bin/suoha-quic-daemon.sh
+    fi
+}
+
+sq_start() {
+    sq_stop_process
+    if has_systemd && [ -f "$SQ_UNIT" ]; then
+        systemctl restart suoha-shadowquic
+    else
+        nohup /usr/local/bin/suoha-quic-daemon.sh < /dev/null > /dev/null 2>&1 &
+        echo $! > /run/suoha-shadowquic.pid
+    fi
+    sleep 2
+}
+
+sq_stop_process() {
+    # 停掉 suoha 管的服务（含可能被接管的旧服务）
+    if has_systemd; then
+        systemctl stop suoha-shadowquic 2>/dev/null || true
+        systemctl stop shadowquic 2>/dev/null || true
+    fi
+    [ -f /etc/init.d/shadowquic ] && /etc/init.d/shadowquic stop 2>/dev/null || true
+    [ -f "$SQ_INIT" ] && /etc/init.d/suoha-shadowquic stop 2>/dev/null || true
+    pkill -f '[s]hadowquic -c' 2>/dev/null || true
+    pkill -f '[s]hadowquic-daemon.sh' 2>/dev/null || true
+    pkill -f '[s]uoha-quic-daemon.sh' 2>/dev/null || true
+    if command_exists pgrep; then
+        for p in $(pgrep -f '[s]hadowquic'); do kill -9 "$p" 2>/dev/null || true; done
+    fi
+    sleep 1
+}
+
+sq_status_line() {
+    local st="未运行"
+    if has_systemd && [ -f "$SQ_UNIT" ]; then
+        [ "$(systemctl is-active suoha-shadowquic 2>/dev/null)" = "active" ] && st="运行中"
+    elif pgrep -f '[s]hadowquic' >/dev/null 2>&1; then
+        st="运行中"
+    fi
+    if [ "$st" = "运行中" ]; then
+        say "${C_GREEN}● ShadowQuic：运行中${C_RESET}  (UDP :$SQ_PORT, 模式 $(cat "$SQ_APP_DIR/last-mode" 2>/dev/null || echo direct))"
+    else
+        say "${C_RED}○ ShadowQuic：未运行${C_RESET}"
+    fi
+}
+
+sq_setup() {
+    need_root || return 1
+    say ""
+    info '安装 Suoha Plus ShadowQuic（QUIC 代理，UDP 端口，无需域名/证书）'
+    # 已装旧版 shadowquic（非本脚本管理）→ 提示接管
+    if sq_installed && [ ! -f "$SQ_UNIT" ] && [ ! -f "$SQ_INIT" ]; then
+        warn '检测到旧的 shadowquic 安装，将继续接管（会停止旧服务并复用 /etc/shadowquic）。'
+    fi
+    # 端口
+    local old_port="$SQ_PORT"
+    SQ_PORT="$(ask_default 'ShadowQuic 监听端口（UDP）' "$SQ_PORT")"
+    if ! [[ "$SQ_PORT" =~ ^[0-9]+$ ]] || [ "$SQ_PORT" -lt 1024 ] || [ "$SQ_PORT" -gt 65535 ]; then
+        err '端口无效。'; SQ_PORT="$old_port"; return 1
+    fi
+    # 凭据
+    local sq_user sq_pass sq_sn sq_up
+    sq_user="$(ask_default '用户名' "$(sq_random 10)")"
+    sq_pass="$(ask_default '密码' "$(sq_random 16)")"
+    sq_sn="$(ask_default 'SNI 伪装域名' "$REALITY_SNI")"
+    sq_up="$(ask_default 'JLS upstream（域名:端口，需与客户端 server-name 一致）' "$REALITY_DEST")"
+    # 二进制
+    if ! sq_installed; then
+        local ver
+        info '获取 shadowquic 最新版本...'
+        ver="$(curl -sL --max-time 8 https://api.github.com/repos/spongebob888/shadowquic/releases/latest | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
+        [ -n "$ver" ] || ver="$SQ_VERSION_FALLBACK"
+        info "下载 shadowquic $ver ..."
+        if curl -fsSL --max-time 120 -o /tmp/.sq.dl "https://github.com/spongebob888/shadowquic/releases/download/$ver/shadowquic-x86_64-linux-musl" 2>/dev/null; then
+            if [ "$(head -c 4 /tmp/.sq.dl 2>/dev/null)" = "$(printf '\x7f\x45\x4c\x46')" ]; then
+                chmod +x /tmp/.sq.dl && mv -f /tmp/.sq.dl "$SQ_BIN"
+                ok "shadowquic 安装完成"
+            else
+                rm -f /tmp/.sq.dl; err '下载内容不是有效的 ELF 可执行文件。'; return 1
+            fi
+        else
+            rm -f /tmp/.sq.dl; err '下载失败，请检查网络。'; return 1
+        fi
+    else
+        info 'shadowquic 二进制已存在，跳过下载。'
+    fi
+    # 配置 + 服务 + 启动
+    sq_write_configs "$sq_user" "$sq_pass" "$sq_sn" "$sq_up"
+    sq_write_service
+    sq_start
+    # 自检
+    if ss -lunp 2>/dev/null | grep -q ":$SQ_PORT "; then
+        ok "ShadowQuic 已启动（UDP :$SQ_PORT）"
+    else
+        warn "端口未监听，查看日志：tail -50 $SQ_LOG"
+    fi
+    # 清理旧的 shadowquic 服务注册（已被 suoha-shadowquic 取代，防止开机双启）
+    if [ -f /etc/init.d/shadowquic ]; then
+        rc-update del shadowquic default >/dev/null 2>&1 || true
+        rm -f /etc/init.d/shadowquic
+        info '已移除旧的 shadowquic 服务（配置由本脚本接管）。'
+    fi
+    if [ -f /etc/systemd/system/shadowquic.service ]; then
+        systemctl disable shadowquic >/dev/null 2>&1 || true
+        rm -f /etc/systemd/system/shadowquic.service; systemctl daemon-reload 2>/dev/null || true
+        info '已移除旧的 shadowquic systemd 服务。'
+    fi
+    sq_show_info
+    save_state
+}
+
+sq_show_info() {
+    local u p sn
+    u="$(sed -n 's/.*username: "\([^"]*\)".*/\1/p' "$SQ_APP_DIR/server-direct.yaml" 2>/dev/null | head -1)"
+    p="$(sed -n 's/.*password: "\([^"]*\)".*/\1/p' "$SQ_APP_DIR/server-direct.yaml" 2>/dev/null | head -1)"
+    sn="$(sed -n 's/.*server-name: "\([^"]*\)".*/\1/p' "$SQ_APP_DIR/server-direct.yaml" 2>/dev/null | head -1)"
+    say ""
+    say '—— ShadowQuic 客户端接入 ——'
+    say "服务器: VPS 公网IP（v4/v6）  端口: $SQ_PORT (UDP)"
+    say "用户名: $u"
+    say "密码  : $p"
+    say "server-name: $sn"
+    say ''
+    say 'Clash.Meta / mihomo 写法：'
+    cat <<EOF
+  - name: "suoha-sq"
+    type: shadowquic
+    server: <VPS_IP>
+    port: $SQ_PORT
+    username: "$u"
+    password: "$p"
+    server-name: $sn
+    alpn: ["h3"]
+    zero-rtt: true
+EOF
+    say ''
+    say '官方客户端（shadowquic -c client.yaml）：'
+    cat <<EOF
+inbound:
+    type: socks
+    bind-addr: "127.0.0.1:1089"
+outbound:
+    type: shadowquic
+    addr: "<VPS_IP>:$SQ_PORT"
+    username: "$u"
+    password: "$p"
+    server-name: $sn
+    alpn: ["h3"]
+    initial-mtu: 1300
+    congestion-control: bbr
+    zero-rtt: true
+    gso: true
+    over-stream: false
+log-level: "info"
+EOF
+}
+
+sq_remove() {
+    sq_stop_process
+    if has_systemd; then
+        systemctl disable suoha-shadowquic >/dev/null 2>&1 || true
+        rm -f "$SQ_UNIT"; systemctl daemon-reload 2>/dev/null || true
+    fi
+    rm -f "$SQ_INIT" /usr/local/bin/suoha-quic-daemon.sh
+    rm -rf "$SQ_APP_DIR"
+    ok 'ShadowQuic 已卸载（二进制保留在 /usr/local/bin/shadowquic，如需删除请手动）'
+}
+
+sq_menu() {
+    while true; do
+        banner
+        sq_status_line
+        say ""
+        say '1) 安装/更新 ShadowQuic'
+        say '2) 启动 ShadowQuic'
+        say '3) 停止 ShadowQuic'
+        say '4) 重启 ShadowQuic'
+        say '5) 查看客户端接入信息'
+        say '6) 查看日志（末 30 行）'
+        say '7) 卸载 ShadowQuic'
+        say '0) 返回主菜单'
+        read -r -p '请选择 [0]: ' m
+        case "${m:-0}" in
+            1) sq_setup; pause_screen ;;
+            2) sq_start; sq_status_line; pause_screen ;;
+            3) sq_stop_process; ok 'ShadowQuic 已停止。'; pause_screen ;;
+            4) sq_start; sq_status_line; pause_screen ;;
+            5) [ -f "$SQ_APP_DIR/server-direct.yaml" ] && sq_show_info || warn '尚未安装。'; pause_screen ;;
+            6) tail -n 30 "$SQ_LOG" 2>/dev/null || warn '无日志。'; pause_screen ;;
+            7) read -r -p '确认卸载 ShadowQuic？[y/N]: ' yn; case "$yn" in y|Y) sq_remove ;; *) warn '已取消。' ;; esac; pause_screen ;;
+            0) break ;;
+            *) warn '无效选项。'; sleep 1 ;;
+        esac
+    done
+}
+
 main_menu() {
     while true; do
         banner
@@ -1203,6 +1525,7 @@ main_menu() {
         say '5) 配置管理（修改后自动重启并刷新节点）'
         say '6) 查看当前节点信息'
         say '7) 卸载管理（删除 Xray / 隧道 / 全部）'
+        say '8) 安装/管理 ShadowQuic（QUIC 代理，UDP，可选模块）'
         say '0) 退出'
         read -r -p '请选择 [0]: ' menu
         case "${menu:-0}" in
@@ -1213,6 +1536,7 @@ main_menu() {
             5) config_menu ;;
             6) print_nodes; pause_screen ;;
             7) uninstall_menu ;;
+            8) sq_menu ;;
             0) say '退出成功。'; exit 0 ;;
             *) warn '无效选项。'; sleep 1 ;;
         esac
