@@ -320,10 +320,11 @@ generate_reality_keys() {
     [ -x "$XRAY_BIN" ] || { err "Xray 尚未安装，无法生成 Reality 密钥。"; return 1; }
     local out priv pub sid hexchars i
     out="$("$XRAY_BIN" x25519 2>/dev/null)" || { err "xray x25519 密钥生成失败。"; return 1; }
-    priv="$(printf '%s\n' "$out" | grep -i 'Private key:' | awk '{print $3}')"
-    pub="$(printf '%s\n' "$out" | grep -i 'Public key:' | awk '{print $3}')"
+    # 兼容新旧两种输出：旧版 "Private key:/Public key:"，新版 "PrivateKey:/Password (PublicKey):"
+    priv="$(printf '%s\n' "$out" | grep -i 'private' | head -n 1 | awk '{print $NF}')"
+    pub="$(printf '%s\n' "$out" | grep -i 'public' | head -n 1 | awk '{print $NF}')"
     if [ -z "$priv" ] || [ -z "$pub" ]; then
-        err "无法解析 x25519 输出。"
+        err "无法解析 x25519 输出：$(printf '%s' "$out" | head -n 1)"
         return 1
     fi
     hexchars='0123456789abcdef'
