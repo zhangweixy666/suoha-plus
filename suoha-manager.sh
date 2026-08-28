@@ -374,8 +374,8 @@ write_cloudflared_config() {
     cat > "$tmp" <<EOF
 tunnel: $TUNNEL_ID
 credentials-file: $credentials
-protocol: $CF_PROTOCOL
-edge-ip-version: $EDGE_IP
+protocol: "$CF_PROTOCOL"
+edge-ip-version: "$EDGE_IP"
 no-autoupdate: true
 
 ingress:
