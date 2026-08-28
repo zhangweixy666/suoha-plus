@@ -830,7 +830,7 @@ setup_reality() {
     REALITY_PORT="$(ask_default 'Reality 监听端口（公网直连）' "$REALITY_PORT")"
     REALITY_DEST="$(ask_default '目标网站 dest（域名或 域名:端口，需支持 TLS1.3+h2）' "$REALITY_DEST")"
     REALITY_SNI="$(ask_default 'SNI（一般与 dest 域名一致）' "$REALITY_SNI")"
-    NODE_ADDRESS="$(ask_default '节点连接地址（填 VPS 公网 IP 或域名）' "$(public_ip 2>/dev/null || echo '')")"
+    NODE_ADDRESS="$(ask_default '节点连接地址（默认IPv6，可改IPv4/域名）' "$(reality_default_address 2>/dev/null || echo '')")"
     UUID="$(ask_default 'UUID' "$UUID")"
     validate_reality || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; return 1; }
     validate_common || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; return 1; }
@@ -849,6 +849,26 @@ public_ip() {
     ip="$(curl -fsS4 --max-time 5 https://api.ipify.org 2>/dev/null || true)"
     [ -n "$ip" ] || ip="$(curl -fsS4 --max-time 5 https://ifconfig.me 2>/dev/null || true)"
     printf '%s' "$ip"
+}
+
+public_ip6() {
+    local ip
+    ip="$(curl -fsS6 --max-time 5 https://api64.ipify.org 2>/dev/null || true)"
+    if [ -z "$ip" ]; then
+        ip="$(ip -6 addr show scope global 2>/dev/null | grep -o 'inet6 [0-9a-f:]*' | awk '{print $2}' | grep -v '^fe80' | head -n 1)"
+    fi
+    printf '%s' "$ip"
+}
+
+reality_default_address() {
+    local ip6 ip4
+    ip6="$(public_ip6 2>/dev/null || true)"
+    if [ -n "$ip6" ]; then
+        printf '[%s]' "$ip6"
+        return 0
+    fi
+    ip4="$(public_ip 2>/dev/null || true)"
+    printf '%s' "$ip4"
 }
 
 setup_quick() {
