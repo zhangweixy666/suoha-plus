@@ -38,7 +38,7 @@ if [ ! -t 0 ]; then
 fi
 
 APP_NAME="suoha-plus"
-APP_VERSION="2.0.0"
+APP_VERSION="2.1.0"
 APP_DIR="/opt/suoha-plus"
 BIN_DIR="$APP_DIR/bin"
 LOG_DIR="$APP_DIR/logs"
@@ -63,7 +63,8 @@ XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download/$XRAY_VER
 CF_RELEASE_BASE="https://github.com/cloudflare/cloudflared/releases/download/$CLOUDFLARED_VERSION"
 
 # 仅作显示和生成节点使用；不会自动更新到 latest。
-NODE_ADDRESS="cloudflare.182682.xyz"
+# WS 节点默认接入域名：大厂自有域名且解析到 Cloudflare 边缘（对中国友好，非微软系）
+NODE_ADDRESS="www.visa.com"
 MODE="quick"
 PROTOCOL="vmess"
 EDGE_IP="4"
@@ -76,6 +77,14 @@ DOMAIN=""
 TUNNEL_NAME="suoha-plus"
 TUNNEL_ID=""
 ISP_TAG="SuohaPlus"
+# Reality 直连参数（vless + XTLS Vision，无需域名和隧道）
+REALITY_ENABLED="no"
+REALITY_PORT="8443"
+REALITY_DEST="www.apple.com"
+REALITY_SNI="www.apple.com"
+REALITY_PRIVATE=""
+REALITY_PUBLIC=""
+REALITY_SHORT_ID=""
 
 if [ -t 1 ]; then
     C_RESET="\033[0m"; C_BLUE="\033[1;34m"; C_CYAN="\033[1;36m"
@@ -164,6 +173,13 @@ save_state() {
         printf 'TUNNEL_NAME=%q\n' "$TUNNEL_NAME"
         printf 'TUNNEL_ID=%q\n' "$TUNNEL_ID"
         printf 'ISP_TAG=%q\n' "$ISP_TAG"
+        printf 'REALITY_ENABLED=%q\n' "$REALITY_ENABLED"
+        printf 'REALITY_PORT=%q\n' "$REALITY_PORT"
+        printf 'REALITY_DEST=%q\n' "$REALITY_DEST"
+        printf 'REALITY_SNI=%q\n' "$REALITY_SNI"
+        printf 'REALITY_PRIVATE=%q\n' "$REALITY_PRIVATE"
+        printf 'REALITY_PUBLIC=%q\n' "$REALITY_PUBLIC"
+        printf 'REALITY_SHORT_ID=%q\n' "$REALITY_SHORT_ID"
     } > "$STATE_FILE"
     chmod 600 "$STATE_FILE"
 }
@@ -300,13 +316,86 @@ ensure_software() {
     fi
 }
 
+generate_reality_keys() {
+    [ -x "$XRAY_BIN" ] || { err "Xray 尚未安装，无法生成 Reality 密钥。"; return 1; }
+    local out priv pub sid hexchars i
+    out="$("$XRAY_BIN" x25519 2>/dev/null)" || { err "xray x25519 密钥生成失败。"; return 1; }
+    priv="$(printf '%s\n' "$out" | grep -i 'Private key:' | awk '{print $3}')"
+    pub="$(printf '%s\n' "$out" | grep -i 'Public key:' | awk '{print $3}')"
+    if [ -z "$priv" ] || [ -z "$pub" ]; then
+        err "无法解析 x25519 输出。"
+        return 1
+    fi
+    hexchars='0123456789abcdef'
+    sid=""
+    for i in 1 2 3 4 5 6 7 8; do
+        sid+="${hexchars:$(RANDOM % 16):1}"
+    done
+    REALITY_PRIVATE="$priv"; REALITY_PUBLIC="$pub"; REALITY_SHORT_ID="$sid"
+    return 0
+}
+
+validate_reality() {
+    case "$REALITY_ENABLED" in yes|no) ;; *) REALITY_ENABLED="no" ;; esac
+    [ "$REALITY_ENABLED" = "yes" ] || return 0
+    if ! [[ "$REALITY_PORT" =~ ^[0-9]+$ ]] || [ "$REALITY_PORT" -lt 1024 ] || [ "$REALITY_PORT" -gt 65535 ]; then
+        err "Reality 端口必须是 1024-65535。"; return 1
+    fi
+    [ -n "$REALITY_DEST" ] || { err "Reality dest 不能为空。"; return 1; }
+    case "$REALITY_DEST" in
+        *:*) : ;;
+        *) REALITY_DEST="$REALITY_DEST:443" ;;
+    esac
+    [ -n "$REALITY_SNI" ] || { err "Reality SNI 不能为空。"; return 1; }
+    [ -n "$REALITY_PRIVATE" ] || { err "缺少 Reality 私钥，请重新安装 Reality 节点。"; return 1; }
+    [ -n "$REALITY_PUBLIC" ] || { err "缺少 Reality 公钥，请重新安装 Reality 节点。"; return 1; }
+    if ! [[ "$REALITY_SHORT_ID" =~ ^[0-9a-f]*$ ]] || [ $(( ${#REALITY_SHORT_ID} % 2 )) -ne 0 ] || [ "${#REALITY_SHORT_ID}" -gt 16 ]; then
+        err "Reality shortId 必须是 0-f 的偶数长度十六进制（最长16位）。"; return 1
+    fi
+    return 0
+}
+
 write_xray_config() {
     validate_common || return 1
+    validate_reality || return 1
     mkdir -p "$APP_DIR" "$LOG_DIR" || return 1
     local tmp tmpdir
     tmpdir="$(mktemp -d "$APP_DIR/.xcfg.XXXXXX")" || return 1
     tmp="$tmpdir/config.json"
-    if [ "$PROTOCOL" = "vmess" ]; then
+    if [ "$REALITY_ENABLED" = "yes" ]; then
+        cat > "$tmp" <<EOF
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [
+    {
+      "listen": "0.0.0.0",
+      "port": $REALITY_PORT,
+      "protocol": "vless",
+      "settings": {
+        "decryption": "none",
+        "clients": [ { "id": "$UUID", "flow": "xtls-rprx-vision" } ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "dest": "$REALITY_DEST",
+          "serverNames": [ "$REALITY_SNI" ],
+          "privateKey": "$REALITY_PRIVATE",
+          "shortIds": [ "$REALITY_SHORT_ID" ]
+        }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [ "http", "tls", "quic" ],
+        "routeOnly": true
+      }
+    }
+  ],
+  "outbounds": [ { "protocol": "freedom", "settings": {} } ]
+}
+EOF
+    elif [ "$PROTOCOL" = "vmess" ]; then
         cat > "$tmp" <<EOF
 {
   "log": { "loglevel": "warning" },
@@ -419,8 +508,11 @@ generate_nodes() {
     {
         printf '# Suoha Plus 节点信息（自动生成，请勿手动编辑）\n'
         printf '# Xray %s | cloudflared %s\n' "$XRAY_VERSION" "$CLOUDFLARED_VERSION"
-        printf '# 模式：%s | 本地端口：%s | WS 路径：%s\n\n' "$MODE" "$XRAY_PORT" "$WS_PATH"
-        if [ -z "$host" ]; then
+        if [ "$REALITY_ENABLED" = "yes" ]; then
+            printf '# Reality 直连节点 | 端口：%s | SNI：%s\n\n' "$REALITY_PORT" "$REALITY_SNI"
+            printf 'vless://%s@%s:%s?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s_reality\n' "$UUID" "$NODE_ADDRESS" "$REALITY_PORT" "$REALITY_SNI" "$REALITY_PUBLIC" "$REALITY_SHORT_ID" "$label"
+            printf '\n# 提示：Reality 为 VPS 直连，无需域名/隧道/优选；fp 也可试 ios、safari\n'
+        elif [ -z "$host" ]; then
             printf '# 隧道尚未启动，启动成功后再次运行本脚本即可生成节点。\n'
         elif [ "$PROTOCOL" = "vmess" ]; then
             json="$(printf '{"v":"2","ps":"%s_tls","add":"%s","port":"443","id":"%s","aid":"0","net":"ws","type":"none","host":"%s","path":"%s","tls":"tls","sni":"%s"}' "$ISP_TAG" "$NODE_ADDRESS" "$UUID" "$host" "$WS_PATH" "$host")"
@@ -542,7 +634,10 @@ stop_services() {
 restart_services() {
     need_root || return 1
     [ -f "$XRAY_CONFIG" ] || { err "还没有配置，请先安装一种模式。"; return 1; }
-    if [ "$MODE" = "persistent" ]; then
+    if [ "$REALITY_ENABLED" = "yes" ]; then
+        stop_services
+        start_xray || return 1
+    elif [ "$MODE" = "persistent" ]; then
         write_cloudflared_config || return 1
         if has_systemd; then
             install_systemd_units || return 1
@@ -718,6 +813,42 @@ apply_config_now() {
     print_nodes
 }
 
+setup_reality() {
+    need_root || return 1
+    stop_services 2>/dev/null || true
+    remove_systemd_units
+    MODE="reality"
+    REALITY_ENABLED="yes"
+    ensure_software || { MODE="quick"; REALITY_ENABLED="no"; return 1; }
+    say ""
+    info "正在生成 Reality 密钥（x25519）..."
+    generate_reality_keys || { MODE="quick"; REALITY_ENABLED="no"; return 1; }
+    say ""
+    say '请确认 Reality 节点参数（直接回车使用默认值）：'
+    REALITY_PORT="$(ask_default 'Reality 监听端口（公网直连）' "$REALITY_PORT")"
+    REALITY_DEST="$(ask_default '目标网站 dest（域名或 域名:端口，需支持 TLS1.3+h2）' "$REALITY_DEST")"
+    REALITY_SNI="$(ask_default 'SNI（一般与 dest 域名一致）' "$REALITY_SNI")"
+    NODE_ADDRESS="$(ask_default '节点连接地址（填 VPS 公网 IP 或域名）' "$(public_ip 2>/dev/null || echo '')")"
+    UUID="$(ask_default 'UUID' "$UUID")"
+    validate_reality || { MODE="quick"; REALITY_ENABLED="no"; return 1; }
+    validate_common || { MODE="quick"; REALITY_ENABLED="no"; return 1; }
+    mkdir -p "$APP_DIR" "$LOG_DIR" "$TMP_DIR"
+    write_xray_config || { MODE="quick"; REALITY_ENABLED="no"; return 1; }
+    save_state
+    start_xray || return 1
+    save_state
+    generate_nodes
+    print_nodes
+    ok "Reality 直连节点安装完成；管理命令：$CMD_LINK"
+}
+
+public_ip() {
+    local ip
+    ip="$(curl -fsS4 --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+    [ -n "$ip" ] || ip="$(curl -fsS4 --max-time 5 https://ifconfig.me 2>/dev/null || true)"
+    printf '%s' "$ip"
+}
+
 setup_quick() {
     need_root || return 1
     local old_mode="$MODE"
@@ -767,12 +898,18 @@ show_config() {
     printf '模式          : %s\n' "$MODE"
     printf 'Xray 协议     : %s\n' "$PROTOCOL"
     printf 'Xray 版本     : %s（固定）\n' "$XRAY_VERSION"
-    printf '本地端口      : %s\n' "$XRAY_PORT"
-    printf 'UUID          : %s\n' "$UUID"
-    printf 'WS 路径       : %s\n' "$WS_PATH"
-    printf '边缘 IP       : IPv%s\n' "$EDGE_IP"
-    printf '隧道协议      : %s\n' "$CF_PROTOCOL"
-    printf '节点地址      : %s\n' "$NODE_ADDRESS"
+    if [ "$REALITY_ENABLED" = "yes" ]; then
+        printf 'Reality 端口  : %s\n' "$REALITY_PORT"
+        printf 'Reality dest  : %s\n' "$REALITY_DEST"
+        printf 'Reality SNI   : %s\n' "$REALITY_SNI"
+    else
+        printf '本地端口      : %s\n' "$XRAY_PORT"
+        printf 'UUID          : %s\n' "$UUID"
+        printf 'WS 路径       : %s\n' "$WS_PATH"
+        printf '边缘 IP       : IPv%s\n' "$EDGE_IP"
+        printf '隧道协议      : %s\n' "$CF_PROTOCOL"
+        printf '节点地址      : %s\n' "$NODE_ADDRESS"
+    fi
     [ "$MODE" = "quick" ] && printf 'Quick 地址    : %s\n' "${QUICK_URL:-未启动}"
     [ "$MODE" = "persistent" ] && printf '绑定域名      : %s\nTunnel 名称   : %s\nTunnel ID     : %s\n' "$DOMAIN" "$TUNNEL_NAME" "$TUNNEL_ID"
     printf '节点文件      : %s\n' "$NODE_FILE"
@@ -928,7 +1065,9 @@ service_menu() {
         case "$menu" in
             1)
                 if start_xray; then
-                    if [ "$MODE" = "quick" ]; then start_quick_tunnel; else start_persistent_tunnel; fi
+                    if [ "$REALITY_ENABLED" = "yes" ]; then
+                        : # Reality 直连，无需隧道
+                    elif [ "$MODE" = "quick" ]; then start_quick_tunnel; else start_persistent_tunnel; fi
                     save_state
                     generate_nodes
                 fi
@@ -955,19 +1094,21 @@ main_menu() {
         fi
         say '1) 安装/启动 Quick Tunnel（重启后需重新生成地址）'
         say '2) 安装/启动持久化 Tunnel（需要 Cloudflare 域名授权）'
-        say '3) 服务管理'
-        say '4) 配置管理（修改后自动重启并刷新节点）'
-        say '5) 查看当前节点信息'
-        say '6) 卸载管理（删除 Xray / 隧道 / 全部）'
+        say '3) 安装/启动 Reality 直连节点（无需域名，vless+Vision）'
+        say '4) 服务管理'
+        say '5) 配置管理（修改后自动重启并刷新节点）'
+        say '6) 查看当前节点信息'
+        say '7) 卸载管理（删除 Xray / 隧道 / 全部）'
         say '0) 退出'
         read -r -p '请选择 [0]: ' menu
         case "${menu:-0}" in
             1) setup_quick; pause_screen ;;
             2) setup_persistent; pause_screen ;;
-            3) service_menu ;;
-            4) config_menu ;;
-            5) print_nodes; pause_screen ;;
-            6) uninstall_menu ;;
+            3) setup_reality; pause_screen ;;
+            4) service_menu ;;
+            5) config_menu ;;
+            6) print_nodes; pause_screen ;;
+            7) uninstall_menu ;;
             0) say '退出成功。'; exit 0 ;;
             *) warn '无效选项。'; sleep 1 ;;
         esac
