@@ -816,14 +816,15 @@ apply_config_now() {
 
 setup_reality() {
     need_root || return 1
+    local old_mode="$MODE" old_reality="$REALITY_ENABLED"
     stop_services 2>/dev/null || true
     remove_systemd_units
     MODE="reality"
     REALITY_ENABLED="yes"
-    ensure_software || { MODE="quick"; REALITY_ENABLED="no"; return 1; }
+    ensure_software || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; return 1; }
     say ""
     info "正在生成 Reality 密钥（x25519）..."
-    generate_reality_keys || { MODE="quick"; REALITY_ENABLED="no"; return 1; }
+    generate_reality_keys || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; return 1; }
     say ""
     say '请确认 Reality 节点参数（直接回车使用默认值）：'
     REALITY_PORT="$(ask_default 'Reality 监听端口（公网直连）' "$REALITY_PORT")"
@@ -831,10 +832,10 @@ setup_reality() {
     REALITY_SNI="$(ask_default 'SNI（一般与 dest 域名一致）' "$REALITY_SNI")"
     NODE_ADDRESS="$(ask_default '节点连接地址（填 VPS 公网 IP 或域名）' "$(public_ip 2>/dev/null || echo '')")"
     UUID="$(ask_default 'UUID' "$UUID")"
-    validate_reality || { MODE="quick"; REALITY_ENABLED="no"; return 1; }
-    validate_common || { MODE="quick"; REALITY_ENABLED="no"; return 1; }
+    validate_reality || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; return 1; }
+    validate_common || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; return 1; }
     mkdir -p "$APP_DIR" "$LOG_DIR" "$TMP_DIR"
-    write_xray_config || { MODE="quick"; REALITY_ENABLED="no"; return 1; }
+    write_xray_config || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; return 1; }
     save_state
     start_xray || return 1
     save_state
