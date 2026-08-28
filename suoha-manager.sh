@@ -38,7 +38,7 @@ if [ ! -t 0 ]; then
 fi
 
 APP_NAME="suoha-plus"
-APP_VERSION="2.2.1"
+APP_VERSION="2.2.2"
 APP_DIR="/opt/suoha-plus"
 BIN_DIR="$APP_DIR/bin"
 LOG_DIR="$APP_DIR/logs"
@@ -800,6 +800,24 @@ cloudflare_login() {
     "$CF_BIN" tunnel login || { err "Cloudflare 登录失败。"; return 1; }
 }
 
+cf_delete_tunnel_record() {
+    # 删除 Cloudflare 账号上的同名隧道记录（先清理残留连接）
+    local name="$1"
+    [ -x "$CF_BIN" ] || return 1
+    "$CF_BIN" tunnel cleanup "$name" >/dev/null 2>&1 || true
+    "$CF_BIN" tunnel delete -f "$name" >/dev/null 2>&1
+}
+
+cf_full_cleanup() {
+    warn '将删除本机全部 Cloudflare 配置（授权文件 + 隧道凭据）并清理账号上的同名旧隧道，然后重新登录。'
+    stop_services 2>/dev/null || true
+    cf_delete_tunnel_record "$TUNNEL_NAME" && ok "已删除账号上的旧隧道：$TUNNEL_NAME" || warn "旧隧道删除失败（可能已不存在），继续。"
+    rm -rf /root/.cloudflared
+    rm -f "$APP_DIR/tunnel-create.log"
+    TUNNEL_ID=""
+    ok '本地 Cloudflare 配置已清空。'
+}
+
 find_tunnel_id() {
     local output id
     output="$1"
@@ -823,6 +841,12 @@ ensure_named_tunnel() {
     fi
     if [ -n "$TUNNEL_ID" ] && [ -f "/root/.cloudflared/$TUNNEL_ID.json" ]; then
         return 0
+    fi
+    # 账号上已有同名旧隧道但本地缺凭据 → 删除重建，避免 create 失败
+    if [ -n "$TUNNEL_ID" ]; then
+        warn "检测到账号上已有同名隧道 $TUNNEL_NAME 但本地凭据缺失，正在删除重建..."
+        cf_delete_tunnel_record "$TUNNEL_NAME" || { err "旧隧道删除失败，请手动处理：cloudflared tunnel delete -f $TUNNEL_NAME"; return 1; }
+        TUNNEL_ID=""
     fi
     output="$($CF_BIN tunnel create "$TUNNEL_NAME" 2>&1)"
     printf '%s\n' "$output" > "$APP_DIR/tunnel-create.log"
@@ -974,6 +998,16 @@ setup_quick() {
 setup_persistent() {
     need_root || return 1
     local old_mode="$MODE"
+    # 已有 Cloudflare 配置（重装场景）→ 询问是否清空重新登录
+    if [ -d /root/.cloudflared ] || [ -n "$TUNNEL_ID" ]; then
+        say ""
+        warn '检测到已有 Cloudflare 配置（授权/凭据）。'
+        read -r -p '删除全部 Cloudflare 配置并重新登录？[y/N]: ' cfans
+        case "$cfans" in
+            y|Y) cf_full_cleanup || { MODE="$old_mode"; return 1; } ;;
+            *) info '保留现有配置，复用授权文件与隧道。' ;;
+        esac
+    fi
     stop_services 2>/dev/null || true
     MODE="persistent"
     QUICK_URL=""
