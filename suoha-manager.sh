@@ -327,11 +327,11 @@ generate_reality_keys() {
         err "无法解析 x25519 输出：$(printf '%s' "$out" | head -n 1)"
         return 1
     fi
-    hexchars='0123456789abcdef'
-    sid=""
-    for i in 1 2 3 4 5 6 7 8; do
-        sid+="${hexchars:$(RANDOM % 16):1}"
-    done
+    if command_exists openssl; then
+        sid="$(openssl rand -hex 4)"
+    else
+        sid="$(od -An -tx1 -N4 /dev/urandom 2>/dev/null | tr -d ' \n')"
+    fi
     REALITY_PRIVATE="$priv"; REALITY_PUBLIC="$pub"; REALITY_SHORT_ID="$sid"
     return 0
 }
