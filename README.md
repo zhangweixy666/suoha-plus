@@ -4,6 +4,16 @@ VPS 一键部署 Xray 节点：**vless+Reality 直连（无需域名）** 与 **
 
 适用于 Debian/Ubuntu 等 Linux VPS（独立 IPv4、NAT、仅 IPv6 机器均可），兼容 systemd 与 OpenRC（Alpine）。README 的命令按「一个代码块一个命令」排列，便于直接复制执行。
 
+## 📌 项目来源
+
+本脚本由以下一键脚本的增强分支开发而来（在其基础上重构并扩展了 Reality、ShadowQuic、健康检测等功能）：
+
+```sh
+curl https://suoha.psai.eu.org/suoha.sh -o suoha.sh && chmod +x suoha.sh && bash suoha.sh
+```
+
+原脚本不受本仓库影响；本脚本独立安装、独立卸载，可与原脚本共存。
+
 ## ✨ 项目简介
 
 本脚本是一个独立的增强版管理工具，**不会影响机器上的其他脚本与服务**。
@@ -24,11 +34,12 @@ VPS 一键部署 Xray 节点：**vless+Reality 直连（无需域名）** 与 **
   - 自动生成随机账号密码，直连/SOCKS5 出站双配置文件，一键切换
   - 独立 systemd / OpenRC 服务 `suoha-shadowquic`，开机自启 + 崩溃自动重启
   - 已有旧 shadowquic 安装会被自动接管（停旧服务、移除旧注册、复用配置目录）
-  - 安装完成直接输出 Clash.Meta/mihomo 与官方客户端两份接入配置
+  - 生成 **sq:// 分享链接**（IPv4/IPv6 双栈）+ Clash.Meta/mihomo + 官方客户端配置
 - Reality 与 WS+隧道可**双节点共存**：一次安装，两条链路互为备份
 - 自动生成 vless:// / vmess:// 分享链接，v2rayN / v2rayNG / Clash Meta 可直接导入
 - **运行状态显示**：主菜单实时 `● 运行中 / ○ 未运行`（含 PID）
 - **健康检测**：服务在线时自动实测 Reality 端口监听、隧道域名 WS 链路
+- **配置位置透明 + 手动编辑**：菜单内直接查看/编辑 Xray、隧道、ShadowQuic 配置文件
 - 支持单独删除 Xray 或单独删除 Cloudflare Tunnel 服务；ShadowQuic 独立子菜单管理
 - 支持一键完全卸载，不影响系统其他组件
 - 本地 WS 仅监听 127.0.0.1，公网流量全部走 Cloudflare 边缘网络；Reality/QUIC 端口独立监听
@@ -43,11 +54,12 @@ VPS 一键部署 Xray 节点：**vless+Reality 直连（无需域名）** 与 **
 | Quick Tunnel | 无需 Cloudflare 授权，运行即得 trycloudflare.com 临时地址 |
 | 持久化 Tunnel | 使用已有 cert.pem 授权，域名固定不变 |
 | 双节点共存 | Reality 直连 + WS 隧道同时运行，节点文件同时输出两类链接 |
-| ShadowQuic 模块 | 可选 QUIC 代理：UDP 1443、SNI 伪装、随机凭据、直连/SOCKS 出站切换 |
+| ShadowQuic 模块 | 可选 QUIC 代理：UDP 1443、SNI 伪装、随机凭据、sq:// 链接、直连/SOCKS 出站切换 |
 | 运行状态显示 | 主菜单实时显示 `● 运行中 / ○ 未运行`（含 PID） |
 | 健康检测 | 服务在线时自动实测：Reality 端口监听、隧道域名 WS 链路探测 |
+| 配置管理 | 菜单内显示配置文件位置，支持 vi/vim/nano 手动编辑后自动重启生效 |
 | 协议支持 | Reality 模式 vless+TCP；隧道模式 vmess/vless+WS；QUIC 模式 shadowquic |
-| 节点生成 | 自动生成 vless:// / vmess:// 分享链接（Reality v4/v6、TLS 443、明文 80） |
+| 节点生成 | 自动生成 vless:// / vmess:// / sq:// 分享链接（Reality v4/v6、TLS 443、明文 80） |
 | 重启刷新 | 重启服务自动换新 Quick 地址并同步更新节点文件 |
 | 组件卸载 | 支持单独删除 Xray / 单独删除 Tunnel / ShadowQuic / 全部删除 |
 | 中文界面 | 菜单、状态、错误提示均为中文 |
@@ -129,8 +141,15 @@ bash /root/suoha-manager.sh
 
 - 安装时默认：UDP `1443`、随机用户名/密码、SNI 伪装 `www.apple.com`、直连出站
 - 二进制来自 [spongebob888/shadowquic](https://github.com/spongebob888/shadowquic) 官方 release（x86_64 musl 静态编译，ELF 校验后安装）
-- 配置位置：`/etc/shadowquic/server-direct.yaml`（直连出站）/ `server-socks.yaml`（SOCKS5 出站）/ `last-mode`
-- 切换出站模式：编辑 `/etc/shadowquic/last-mode` 写入 `direct` 或 `socks` 后重启服务
+- 安装完成自动输出三种接入方式：**sq:// 分享链接**、Clash.Meta/mihomo YAML、官方客户端 YAML
+
+**sq:// 分享链接格式**（部分客户端如 QuicProxy、husi、nekobox 支持直接导入）：
+
+```text
+sq://用户名:密码@[IPv6]:1443?alpn=h3&mtu=1280&sni=www.apple.com&udp_mode=datagram&zero_rtt=true#节点名
+sq://用户名:密码@IPv4:1443?alpn=h3&mtu=1280&sni=www.apple.com&udp_mode=datagram&zero_rtt=true#节点名
+```
+
 - 注意：云安全组需放行 **UDP 1443**
 
 ## 📄 节点文件
@@ -141,17 +160,27 @@ bash /root/suoha-manager.sh
 /opt/suoha-plus/v2ray.txt
 ```
 
-Reality 模式示例输出：
+内容包含：Reality vless:// 链接（v4/v6）、WS+隧道 vless:// 或 vmess:// 链接、ShadowQuic sq:// 链接，以及对应配置文件位置注释。
 
-```text
-vless://<uuid>@<IPv4>:8443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.apple.com&fp=chrome&pbk=<公钥>&sid=<shortId>&type=tcp#SuohaPlus_reality_v4
+## ⚙️ 配置文件位置
 
-vless://<uuid>@<IPv6>:8443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.apple.com&fp=chrome&pbk=<公钥>&sid=<shortId>&type=tcp#SuohaPlus_reality_v6
-```
+主菜单顶部实时显示当前配置位置，也可在 `5) 配置管理 → 4) 手动编辑` 中查看和编辑：
 
-若同时存在隧道域名，还会附带 WS+隧道节点链接（TLS 443 / 优选域名 / 明文 80）。
+| 组件 | 配置路径 |
+|------|---------|
+| Xray | `/opt/suoha-plus/xray.json` |
+| Cloudflare Tunnel | `/opt/suoha-plus/config.yaml`（Quick 模式自动生成） |
+| ShadowQuic 直连出站 | `/etc/shadowquic/server-direct.yaml` |
+| ShadowQuic SOCKS 出站 | `/etc/shadowquic/server-socks.yaml` |
+| ShadowQuic 出站模式 | `/etc/shadowquic/last-mode`（direct / socks） |
+| 节点文件 | `/opt/suoha-plus/v2ray.txt` |
 
-ShadowQuic 不生成分享链接（官方无统一 URI 格式），安装完成后直接输出 Clash.Meta/mihomo 与官方客户端 YAML 配置。
+`5) 配置管理 → 4) 手动编辑` 支持用 vi/vim/nano 直接编辑以上文件：
+
+- 编辑 Xray → 保存后自动校验配置、重启服务、刷新节点
+- 编辑隧道 → 保存后自动重启隧道
+- 编辑 ShadowQuic → 保存后自动重启生效
+- 支持一键切换 ShadowQuic 出站模式（direct ⇄ socks）
 
 ## 🧰 服务管理
 
@@ -167,7 +196,7 @@ suoha-plus
 
 服务菜单支持启动 / 停止 / 重启（自动刷新节点）/ 查看节点信息。
 
-配置文件与数据目录：
+数据目录：
 
 ```text
 /opt/suoha-plus/
@@ -177,9 +206,6 @@ suoha-plus
 ├── v2ray.txt          # 节点分享链接
 ├── logs/              # 运行日志
 └── bin/               # 固定版本二进制
-
-/etc/shadowquic/       # ShadowQuic 配置（模块）
-/usr/local/bin/shadowquic  # ShadowQuic 二进制
 ```
 
 ## ❓ 常见问题
@@ -199,8 +225,8 @@ suoha-plus
 **机器上已有别的 shadowquic，会冲突吗？**
 安装时自动接管：停掉旧服务、移除旧的开机自启注册、复用 `/etc/shadowquic` 目录写入新配置，不会双启。
 
-**Quick 和持久化隧道冲突吗？**
-同一时间运行一种隧道模式即可；切换模式时脚本会自动停掉旧服务。
+**手动改了配置怎么生效？**
+Xray：菜单 5→4 编辑保存即自动校验重启；ShadowQuic：菜单 5→4 编辑保存后自动重启；也可以直接重启对应服务。
 
 **会影响机器上原有的 suoha.sh 吗？**
 不会。本脚本使用独立目录 `/opt/suoha-plus`、独立服务名，卸载也只删除自身。
@@ -217,6 +243,7 @@ ShadowQuic 在菜单 `8 → 7` 单独卸载。
 
 ## 📜 版本
 
+- **v2.2.1**：ShadowQuic 生成 `sq://` 分享链接（IPv4/IPv6，alpn/mtu/sni/udp_mode/zero_rtt 参数齐全）并写入节点文件；主菜单显示配置文件位置；新增手动编辑配置功能（vi/vim/nano，保存自动校验重启）；README 标明脚本来源
 - **v2.2.0**：新增 ShadowQuic 可选模块（QUIC 代理，移植自 warp- 项目逻辑，去 WARP/sing-box 依赖）；自动接管旧安装；OpenRC/systemd 双兼容；客户端配置直接输出
 - **v2.1.0**：Reality 直连节点（XTLS Vision，双栈 v4/v6，与 WS 隧道共存）；WS 优选域名默认 `www.visa.com`；运行状态 `●/○` 显示 + 健康检测；修复 x25519 新版输出解析；NAT/纯 IPv6 机器适配
 - **v2.0.0**：suoha-plus 独立版；固定版本；Quick/持久化双隧道；自动节点刷新
