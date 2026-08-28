@@ -242,6 +242,7 @@ Xray：菜单 5→4 编辑保存即自动校验重启；ShadowQuic：菜单 5→
 ShadowQuic 在菜单 `8 → 7` 单独卸载。
 
 ## 📜 版本
+- **v2.2.2**：重装持久化隧道时支持「删除全部 Cloudflare 配置并重新登录」（自动删除账号上的同名旧隧道与本地授权凭据后重新 login）；账号上已有同名隧道但本地凭据缺失时自动删除重建，不再报凭据错误
 
 - **v2.2.1**：ShadowQuic 生成 `sq://` 分享链接（IPv4/IPv6，alpn/mtu/sni/udp_mode/zero_rtt 参数齐全）并写入节点文件；主菜单显示配置文件位置；新增手动编辑配置功能（vi/vim/nano，保存自动校验重启）；README 标明脚本来源
 - **v2.2.0**：新增 ShadowQuic 可选模块（QUIC 代理，移植自 warp- 项目逻辑，去 WARP/sing-box 依赖）；自动接管旧安装；OpenRC/systemd 双兼容；客户端配置直接输出
