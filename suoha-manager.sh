@@ -633,8 +633,12 @@ start_quick_tunnel() {
 }
 
 start_persistent_tunnel() {
-    [ "$MODE" = "persistent" ] || return 1
+    [ "$MODE" = "persistent" ] || [ "$REALITY_ENABLED" = "yes" ] || return 1
     [ -x "$CF_BIN" ] || { err "cloudflared 尚未安装。"; return 1; }
+    # Reality 共存模式：没有隧道配置则静默跳过（纯直连场景）
+    if [ "$MODE" = "reality" ] && [ ! -f "$CF_CONFIG" ]; then
+        return 0
+    fi
     [ -f "$CF_CONFIG" ] || write_cloudflared_config || return 1
     if has_systemd; then
         systemctl start "$SERVICE_CF"
@@ -668,6 +672,10 @@ restart_services() {
     if [ "$REALITY_ENABLED" = "yes" ]; then
         stop_services
         start_xray || return 1
+        # Reality 共存模式：有隧道配置就一并重启
+        if [ -f "$CF_CONFIG" ]; then
+            start_persistent_tunnel || return 1
+        fi
     elif [ "$MODE" = "persistent" ]; then
         write_cloudflared_config || return 1
         if has_systemd; then
@@ -968,13 +976,51 @@ show_config() {
 }
 
 status_line() {
-    local name="$1" unit="$2" pidfile="$3"
+    local name="$1" unit="$2" pidfile="$3" st pid
     if [ "$MODE" = "persistent" ] && has_systemd; then
-        printf '%-22s %s\n' "$name" "$(systemctl is-active "$unit" 2>/dev/null || printf 'unknown')"
+        st="$(systemctl is-active "$unit" 2>/dev/null || printf 'unknown')"
+        pid="$(systemctl show -p MainPID --value "$unit" 2>/dev/null)"
+        [ "$pid" = "0" ] && pid=""
     elif pid_running "$pidfile"; then
-        printf '%-22s running (PID %s)\n' "$name" "$(cat "$pidfile")"
+        st="running"
+        pid="$(cat "$pidfile" 2>/dev/null)"
     else
-        printf '%-22s stopped\n' "$name"
+        st="stopped"
+    fi
+    if [ "$st" = "active" ] || [ "$st" = "running" ]; then
+        say "${C_GREEN}● $name：运行中${C_RESET}  (PID ${pid:-—})"
+    else
+        say "${C_RED}○ $name：未运行${C_RESET}"
+    fi
+}
+
+health_check() {
+    # 只在服务声称运行时做实测：Reality 端口监听 / 隧道 WS 链路探测
+    local xray_alive=0 cf_alive=0
+    { pid_running "$XRAY_PID" || { [ "$MODE" = "persistent" ] && has_systemd && [ "$(systemctl is-active "$SERVICE_XRAY" 2>/dev/null)" = "active" ]; }; } && xray_alive=1
+    { pid_running "$CF_PID" || { [ "$MODE" = "persistent" ] && has_systemd && [ "$(systemctl is-active "$SERVICE_CF" 2>/dev/null)" = "active" ]; }; } && cf_alive=1
+    if [ "$xray_alive" = "0" ] && [ "$cf_alive" = "0" ]; then
+        return 0
+    fi
+    if [ "$xray_alive" = "1" ] && [ "$REALITY_ENABLED" = "yes" ]; then
+        if command_exists ss && ss -tln 2>/dev/null | grep -q ":$REALITY_PORT "; then
+            say "${C_GREEN}✓ Xray 健康    ：Reality 端口 $REALITY_PORT 监听中（v4/v6）${C_RESET}"
+        else
+            say "${C_RED}✗ Xray 异常    ：Reality 端口 $REALITY_PORT 未监听${C_RESET}"
+        fi
+    fi
+    if [ "$cf_alive" = "1" ]; then
+        local host
+        host="$(current_tunnel_host)"
+        if [ -n "$host" ] && command_exists curl; then
+            if curl -s -o /dev/null --max-time 6 "https://$host$WS_PATH"; then
+                say "${C_GREEN}✓ 隧道健康    ：$host$WS_PATH 链路探测通过${C_RESET}"
+            else
+                say "${C_RED}✗ 隧道异常    ：$host$WS_PATH 探测失败（查 Tunnel 日志）${C_RESET}"
+            fi
+        elif [ -n "$host" ]; then
+            say "${C_YELLOW}· 隧道状态    ：进程在线，无法探测（缺少 curl）${C_RESET}"
+        fi
     fi
 }
 
@@ -983,6 +1029,7 @@ show_status() {
     say ""
     status_line "Xray" "$SERVICE_XRAY" "$XRAY_PID"
     status_line "Cloudflare Tunnel" "$SERVICE_CF" "$CF_PID"
+    health_check
     printf 'Xray 日志      : %s\n' "$XRAY_LOG"
     printf 'Tunnel 日志    : %s\n' "$CF_LOG"
 }
@@ -1117,9 +1164,14 @@ service_menu() {
         case "$menu" in
             1)
                 if start_xray; then
-                    if [ "$REALITY_ENABLED" = "yes" ]; then
-                        : # Reality 直连，无需隧道
-                    elif [ "$MODE" = "quick" ]; then start_quick_tunnel; else start_persistent_tunnel; fi
+                    case "$MODE" in
+                        quick) start_quick_tunnel ;;
+                        persistent) start_persistent_tunnel ;;
+                        reality)
+                            # Reality 共存模式：有隧道配置就一并启动
+                            [ -f "$CF_CONFIG" ] && start_persistent_tunnel
+                            ;;
+                    esac
                     save_state
                     generate_nodes
                 fi
