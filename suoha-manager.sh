@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# v2.3.1-testing: VPS direct push demo
 # Suoha Plus - Xray + Cloudflare Tunnel 管理脚本
 # 基于原 suoha.sh 的独立增强版：不会覆盖、删除或调用原脚本。
 # 固定版本（2026-08-27 查询到的 GitHub 最新正式版）
