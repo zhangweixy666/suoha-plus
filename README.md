@@ -243,9 +243,8 @@ Xray：菜单 5→4 编辑保存即自动校验重启；ShadowQuic：菜单 5→
 ShadowQuic 在菜单 `8 → 7` 单独卸载。
 
 ## 📜 版本
-- **v2.3.0**：新增 OpenRC 开机自启支持（Alpine：xray 与 cloudflared 名为 suoha-plus-xray / suoha-plus-cloudflared 的服务自动注册 rc-update default，重启后自动拉起，崩溃自动重启）；修复无 systemd 时后台进程方式无自启的问题；支持卸载时清理 OpenRC 注册
-
 - **v2.3.1**：修复 ShadowQuic 守护脚本缺失时静默启动失败（启动前自动重建 daemon/init 服务，并接管清理旧版 shadowquic 自启注册）；修复组件卸载在 OpenRC 下残留 init.d 脚本与自启注册的问题；`--version/--help` 在管道模式下不再误触发自重放；重启后隧道健康探测增加重试，消除「刚重启连接未就绪即误报异常」；配置位置显示优化（无隧道配置时不再显示空管道符）；修复管道自重放循环（SUOHA_TTY 标记未检查导致二次重放/死循环）
+- **v2.3.0**：新增 OpenRC 开机自启支持（Alpine：xray 与 cloudflared 名为 suoha-plus-xray / suoha-plus-cloudflared 的服务自动注册 rc-update default，重启后自动拉起，崩溃自动重启）；修复无 systemd 时后台进程方式无自启的问题；支持卸载时清理 OpenRC 注册
 - **v2.2.2**：重装持久化隧道时支持「删除全部 Cloudflare 配置并重新登录」（自动删除账号上的同名旧隧道与本地授权凭据后重新 login）；账号上已有同名隧道但本地凭据缺失时自动删除重建，不再报凭据错误
 
 - **v2.2.1**：ShadowQuic 生成 `sq://` 分享链接（IPv4/IPv6，alpn/mtu/sni/udp_mode/zero_rtt 参数齐全）并写入节点文件；主菜单显示配置文件位置；新增手动编辑配置功能（vi/vim/nano，保存自动校验重启）；README 标明脚本来源
