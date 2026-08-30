@@ -4,7 +4,7 @@
 # 固定版本（2026-08-27 查询到的 GitHub 最新正式版）
 
 # 管道自重放：支持 wget -qO- URL | sh 一键运行（下载副本后用真实 tty 重启自身）
-if [ ! -t 0 ] && [ "$#" -eq 0 ]; then
+if [ -z "${SUOHA_TTY:-}" ] && [ ! -t 0 ] && [ "$#" -eq 0 ]; then
     SELF_URL_DEFAULT="https://raw.githubusercontent.com/zhangweixy666/suoha-plus/main/suoha-manager.sh"
     if [ -n "$SUOHA_SELF_URL" ]; then
         _self_url="$SUOHA_SELF_URL"
