@@ -4,7 +4,7 @@
 # 固定版本（2026-08-27 查询到的 GitHub 最新正式版）
 
 # 管道自重放：支持 wget -qO- URL | sh 一键运行（下载副本后用真实 tty 重启自身）
-if [ ! -t 0 ]; then
+if [ ! -t 0 ] && [ "$#" -eq 0 ]; then
     SELF_URL_DEFAULT="https://raw.githubusercontent.com/zhangweixy666/suoha-plus/main/suoha-manager.sh"
     if [ -n "$SUOHA_SELF_URL" ]; then
         _self_url="$SUOHA_SELF_URL"
@@ -26,7 +26,7 @@ if [ ! -t 0 ]; then
     if [ -s "$_install_path" ]; then
         chmod +x "$_install_path" 2>/dev/null
         export SUOHA_TTY=1
-        if [ -r /dev/tty ]; then
+        if bash -c 'exec 0</dev/tty' 2>/dev/null; then
             exec bash "$_install_path" < /dev/tty
         else
             exec bash "$_install_path"
@@ -38,7 +38,7 @@ if [ ! -t 0 ]; then
 fi
 
 APP_NAME="suoha-plus"
-APP_VERSION="2.3.0"
+APP_VERSION="2.3.1"
 APP_DIR="/opt/suoha-plus"
 BIN_DIR="$APP_DIR/bin"
 LOG_DIR="$APP_DIR/logs"
@@ -1143,7 +1143,11 @@ show_config() {
     [ "$MODE" = "quick" ] && printf 'Quick 地址    : %s\n' "${QUICK_URL:-未启动}"
     [ "$MODE" = "persistent" ] && printf '绑定域名      : %s\nTunnel 名称   : %s\nTunnel ID     : %s\n' "$DOMAIN" "$TUNNEL_NAME" "$TUNNEL_ID"
     printf '节点文件      : %s\n' "$NODE_FILE"
-    printf '配置位置      : %s | %s\n' "$XRAY_CONFIG" "${QUICK_URL:+$CF_CONFIG}"
+    if [ -f "$CF_CONFIG" ]; then
+        printf '配置位置      : %s | %s\n' "$XRAY_CONFIG" "$CF_CONFIG"
+    else
+        printf '配置位置      : %s\n' "$XRAY_CONFIG"
+    fi
     [ -f "$SQ_APP_DIR/server-direct.yaml" ] && printf '                ShadowQuic: %s（手动编辑后用菜单8重启生效）\n' "$SQ_APP_DIR/server-direct.yaml"
 }
 
@@ -1185,10 +1189,15 @@ health_check() {
         local host
         host="$(current_tunnel_host)"
         if [ -n "$host" ] && command_exists curl; then
-            if curl -s -o /dev/null --max-time 6 "https://$host$WS_PATH"; then
+            local probe_ok=0 _try
+            for _try in 1 2 3; do
+                if curl -s -o /dev/null --max-time 6 "https://$host$WS_PATH"; then probe_ok=1; break; fi
+                [ "$_try" -lt 3 ] && sleep 3
+            done
+            if [ "$probe_ok" = "1" ]; then
                 say "${C_GREEN}✓ 隧道健康    ：$host$WS_PATH 链路探测通过${C_RESET}"
             else
-                say "${C_RED}✗ 隧道异常    ：$host$WS_PATH 探测失败（查 Tunnel 日志）${C_RESET}"
+                say "${C_RED}✗ 隧道异常    ：$host$WS_PATH 探测失败（隧道可能仍在连接中，或查 Tunnel 日志）${C_RESET}"
             fi
         elif [ -n "$host" ]; then
             say "${C_YELLOW}· 隧道状态    ：进程在线，无法探测（缺少 curl）${C_RESET}"
@@ -1308,6 +1317,11 @@ uninstall_component() {
             systemctl disable --now "$SERVICE_XRAY" >/dev/null 2>&1 || true
             rm -f "/etc/systemd/system/$SERVICE_XRAY"
         fi
+        if has_openrc; then
+            rc-service suoha-plus-xray stop >/dev/null 2>&1 || true
+            rc-update del suoha-plus-xray default >/dev/null 2>&1 || true
+            rm -f /etc/init.d/suoha-plus-xray /usr/local/bin/suoha-xray-daemon.sh
+        fi
         stop_pid "$XRAY_PID"
         rm -f "$XRAY_BIN" "$XRAY_CONFIG" "$XRAY_CONFIG.bak" "$XRAY_PID"
         : > "$XRAY_LOG" 2>/dev/null || true
@@ -1317,6 +1331,11 @@ uninstall_component() {
         if has_systemd; then
             systemctl disable --now "$SERVICE_CF" >/dev/null 2>&1 || true
             rm -f "/etc/systemd/system/$SERVICE_CF"
+        fi
+        if has_openrc; then
+            rc-service suoha-plus-cloudflared stop >/dev/null 2>&1 || true
+            rc-update del suoha-plus-cloudflared default >/dev/null 2>&1 || true
+            rm -f /etc/init.d/suoha-plus-cloudflared /usr/local/bin/suoha-cloudflared-daemon.sh
         fi
         stop_pid "$CF_PID"
         rm -f "$CF_BIN" "$CF_CONFIG" "$CF_CONFIG.bak" "$CF_PID"
@@ -1544,8 +1563,19 @@ sq_start() {
     if has_systemd && [ -f "$SQ_UNIT" ]; then
         systemctl restart suoha-shadowquic
     else
-        nohup /usr/local/bin/suoha-quic-daemon.sh < /dev/null > /dev/null 2>&1 &
-        echo $! > /run/suoha-shadowquic.pid
+        # 守护脚本缺失（手动删除/旧安装未接管）时先重建，避免静默启动失败
+        if [ ! -x /usr/local/bin/suoha-quic-daemon.sh ] && [ -d "$SQ_APP_DIR" ]; then
+            sq_write_service
+            rc-update del shadowquic default >/dev/null 2>&1 || true
+        fi
+        if [ -x "$SQ_INIT" ]; then
+            rc-service suoha-shadowquic start >/dev/null 2>&1 || /etc/init.d/suoha-shadowquic start
+        elif [ -f /etc/init.d/shadowquic ]; then
+            /etc/init.d/shadowquic start
+        else
+            nohup /usr/local/bin/suoha-quic-daemon.sh < /dev/null > /dev/null 2>&1 &
+            echo $! > /run/suoha-shadowquic.pid
+        fi
     fi
     sleep 2
 }
@@ -1698,6 +1728,7 @@ sq_remove() {
         systemctl disable suoha-shadowquic >/dev/null 2>&1 || true
         rm -f "$SQ_UNIT"; systemctl daemon-reload 2>/dev/null || true
     fi
+    rc-update del suoha-shadowquic default >/dev/null 2>&1 || true
     rm -f "$SQ_INIT" /usr/local/bin/suoha-quic-daemon.sh
     rm -rf "$SQ_APP_DIR"
     ok 'ShadowQuic 已卸载（二进制保留在 /usr/local/bin/shadowquic，如需删除请手动）'
