@@ -38,7 +38,7 @@ if [ -z "${SUOHA_TTY:-}" ] && [ ! -t 0 ] && [ "$#" -eq 0 ]; then
 fi
 
 APP_NAME="suoha-plus"
-APP_VERSION="2.3.1"
+APP_VERSION="2.3.2"
 APP_DIR="/opt/suoha-plus"
 BIN_DIR="$APP_DIR/bin"
 LOG_DIR="$APP_DIR/logs"
@@ -236,6 +236,7 @@ install_dependencies() {
     command_exists curl || missing=1
     command_exists unzip || missing=1
     command_exists base64 || missing=1
+    command_exists sha256sum || missing=1
     if [ "$missing" = "0" ]; then return 0; fi
 
     info "正在安装 curl、unzip、base64 等依赖..."
@@ -285,6 +286,15 @@ download_binaries() {
     if ! curl -fL --retry 3 --connect-timeout 15 -o "$tmp/xray.zip" "${XRAY_RELEASE_BASE}/${XRAY_ASSET}"; then
         rm -rf "$tmp"; err "Xray 下载失败。"; return 1
     fi
+    if ! curl -fsSL --retry 3 --connect-timeout 15 -o "$tmp/xray.dgst" "${XRAY_RELEASE_BASE}/${XRAY_ASSET}.dgst"; then
+        rm -rf "$tmp"; err "Xray 校验文件下载失败，拒绝安装。"; return 1
+    fi
+    local xray_sha expected_sha
+    expected_sha="$(awk -F'= ' '/^SHA2-256=/{print $2; exit}' "$tmp/xray.dgst")"
+    xray_sha="$(sha256sum "$tmp/xray.zip" | awk '{print $1}')"
+    if ! [[ "$expected_sha" =~ ^[0-9a-fA-F]{64}$ ]] || [ "$xray_sha" != "$expected_sha" ]; then
+        rm -rf "$tmp"; err "Xray SHA-256 校验失败，拒绝安装。"; return 1
+    fi
     mkdir -p "$tmp/xray" || { rm -rf "$tmp"; return 1; }
     if ! unzip -q "$tmp/xray.zip" -d "$tmp/xray"; then
         rm -rf "$tmp"; err "Xray 压缩包解压失败。"; return 1
@@ -302,6 +312,7 @@ download_binaries() {
     if ! curl -fL --retry 3 --connect-timeout 15 -o "$tmp/cloudflared" "${CF_RELEASE_BASE}/${CF_ASSET}"; then
         rm -rf "$tmp"; err "cloudflared 下载失败。"; return 1
     fi
+    # cloudflared release has no official SHA-256 manifest; verify executable and exact version.
     chmod +x "$tmp/cloudflared"
     if ! "$tmp/cloudflared" version 2>/dev/null | grep -Fq "$CLOUDFLARED_VERSION"; then
         rm -rf "$tmp"; err "cloudflared 版本校验失败，拒绝安装。"; return 1
@@ -812,11 +823,13 @@ install_openrc_units() {
     # wrapper 脚本：让 supervise-daemon 只监督一个简单命令，避免 command_args 瑕疵导致监督失效
     cat > /usr/local/bin/suoha-xray-daemon.sh <<DAEMON
 #!/bin/sh
+mkdir -p $LOG_DIR || exit 1
 exec $XRAY_BIN run -config $XRAY_CONFIG >> $XRAY_LOG 2>&1
 DAEMON
     chmod +x /usr/local/bin/suoha-xray-daemon.sh
     cat > /usr/local/bin/suoha-cloudflared-daemon.sh <<DAEMON
 #!/bin/sh
+mkdir -p $LOG_DIR || exit 1
 exec $CF_BIN tunnel --config $CF_CONFIG run $TUNNEL_NAME >> $CF_LOG 2>&1
 DAEMON
     chmod +x /usr/local/bin/suoha-cloudflared-daemon.sh
@@ -896,13 +909,15 @@ cf_delete_tunnel_record() {
 }
 
 cf_full_cleanup() {
-    warn '将删除本机全部 Cloudflare 配置（授权文件 + 隧道凭据）并清理账号上的同名旧隧道，然后重新登录。'
+    warn '将清理 Suoha Plus 同名 Tunnel 及其本地凭据；不会删除 /root/.cloudflared 中其他项目的授权或凭据。'
     stop_services 2>/dev/null || true
     cf_delete_tunnel_record "$TUNNEL_NAME" && ok "已删除账号上的旧隧道：$TUNNEL_NAME" || warn "旧隧道删除失败（可能已不存在），继续。"
-    rm -rf /root/.cloudflared
-    rm -f "$APP_DIR/tunnel-create.log"
+    if [[ "$TUNNEL_ID" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+        rm -f "/root/.cloudflared/$TUNNEL_ID.json"
+    fi
+    rm -f "$APP_DIR/tunnel-create.log" "$CF_CONFIG"
     TUNNEL_ID=""
-    ok '本地 Cloudflare 配置已清空。'
+    ok 'Suoha Plus 本地 Tunnel 凭据已清理；其他 Cloudflare 配置保持不变。'
 }
 
 find_tunnel_id() {

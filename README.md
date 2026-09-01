@@ -243,6 +243,8 @@ Xray：菜单 5→4 编辑保存即自动校验重启；ShadowQuic：菜单 5→
 ShadowQuic 在菜单 `8 → 7` 单独卸载。
 
 ## 📜 版本
+- **v2.3.2**：Xray 下载增加官方 `.dgst` SHA-256 完整性校验，校验文件缺失或哈希不符时拒绝安装；OpenRC 的 Xray / cloudflared 守护脚本每次启动均自动重建日志目录，避免外部日志清理任务删除目录后影响服务；重装持久化 Tunnel 的清理操作改为仅删除 Suoha Plus 已知 Tunnel 的本地凭据与配置，绝不再清空 `/root/.cloudflared` 中其他项目的授权或凭据。
+
 - **v2.3.1**：修复 ShadowQuic 守护脚本缺失时静默启动失败（启动前自动重建 daemon/init 服务，并接管清理旧版 shadowquic 自启注册）；修复组件卸载在 OpenRC 下残留 init.d 脚本与自启注册的问题；`--version/--help` 在管道模式下不再误触发自重放；重启后隧道健康探测增加重试，消除「刚重启连接未就绪即误报异常」；配置位置显示优化（无隧道配置时不再显示空管道符）；修复管道自重放循环（SUOHA_TTY 标记未检查导致二次重放/死循环）
 - **v2.3.0**：新增 OpenRC 开机自启支持（Alpine：xray 与 cloudflared 名为 suoha-plus-xray / suoha-plus-cloudflared 的服务自动注册 rc-update default，重启后自动拉起，崩溃自动重启）；修复无 systemd 时后台进程方式无自启的问题；支持卸载时清理 OpenRC 注册
 - **v2.2.2**：重装持久化隧道时支持「删除全部 Cloudflare 配置并重新登录」（自动删除账号上的同名旧隧道与本地授权凭据后重新 login）；账号上已有同名隧道但本地凭据缺失时自动删除重建，不再报凭据错误
