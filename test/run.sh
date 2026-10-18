@@ -40,6 +40,7 @@ run_suite "行为测试" test_behavior.sh
 run_suite "卸载沙箱" test_uninstall.sh
 run_suite "真实行为回归" test_regression.sh
 run_suite "真机安装回归" test_reality_install.sh
+run_suite "防卡死回归" test_nohang.sh
 
 echo ""
 echo "========================================"

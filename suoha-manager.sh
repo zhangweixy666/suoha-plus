@@ -38,7 +38,7 @@ if [ -z "${SUOHA_TTY:-}" ] && [ ! -t 0 ] && [ "$#" -eq 0 ]; then
 fi
 
 APP_NAME="suoha-plus"
-APP_VERSION="2.4.2"
+APP_VERSION="2.4.3"
 APP_DIR="/opt/suoha-plus"
 BIN_DIR="$APP_DIR/bin"
 LOG_DIR="$APP_DIR/logs"
@@ -148,8 +148,33 @@ pause_screen() {
 
 ask_default() {
     local prompt="$1" default="$2" answer
-    read -r -p "$prompt [$default]: " answer
+    # 提示符必须单独打印到 stderr：read -p 的提示在 $(...) 子 shell 里会丢失，
+    # 用户只看到空白光标，会误以为脚本卡死。
+    printf '%s [%s]: ' "$prompt" "$default" >&2
+    answer=""
+    if ! IFS= read -r answer; then
+        # stdin 已关闭（管道喂完/非交互环境）：用默认值继续，绝不挂死
+        printf '\n' >&2
+        printf '%s' "$default"
+        return 0
+    fi
     printf '%s' "${answer:-$default}"
+}
+
+# 安全读取：结果写入调用者指定变量，避免 $(...) 子shell 吞掉管道 stdin。
+# 用法：safe_read VAR "提示" "默认值"
+safe_read() {
+    local __var="$1" __prompt="$2" __default="$3" __answer
+    printf '%s' "$__prompt" >&2
+    __answer=""
+    if ! IFS= read -r __answer; then
+        printf '\\n' >&2
+        eval "$__var=\$__default"
+        return 0
+    fi
+    [ -n "$__answer" ] || __answer="$__default"
+    eval "$__var=\$__answer"
+    return 0
 }
 
 command_exists() { command -v "$1" >/dev/null 2>&1; }
@@ -324,10 +349,12 @@ download_binaries() {
     local tmp xray_candidate
     tmp="$(mktemp -d "$TMP_DIR/download.XXXXXX")" || return 1
     cleanup_register "$tmp"
-    info "下载固定版 Xray $XRAY_VERSION ($XRAY_ASSET)..."
-    if ! curl -fL --retry 3 --connect-timeout 15 -o "$tmp/xray.zip" "${XRAY_RELEASE_BASE}/${XRAY_ASSET}"; then
-        rm -rf "$tmp"; err "Xray 下载失败。"; return 1
+    info "下载固定版 Xray $XRAY_VERSION ($XRAY_ASSET，最长等180秒)..."
+    _s1="$(date +%s)"
+    if ! curl -fL --retry 3 --connect-timeout 15 --max-time 180 -o "$tmp/xray.zip" "${XRAY_RELEASE_BASE}/${XRAY_ASSET}"; then
+        rm -rf "$tmp"; err "Xray 下载失败（网络不通或超时）。"; return 1
     fi
+    info "Xray 下载完成，耗时 $(( $(date +%s) - _s1 )) 秒。"
     if ! curl -fsSL --retry 3 --connect-timeout 15 -o "$tmp/xray.dgst" "${XRAY_RELEASE_BASE}/${XRAY_ASSET}.dgst"; then
         rm -rf "$tmp"; err "Xray 校验文件下载失败，拒绝安装。"; return 1
     fi
@@ -350,10 +377,12 @@ download_binaries() {
         rm -rf "$tmp"; err "Xray 版本校验失败，拒绝安装。"; return 1
     fi
 
-    info "下载固定版 cloudflared $CLOUDFLARED_VERSION ($CF_ASSET)..."
-    if ! curl -fL --retry 3 --connect-timeout 15 -o "$tmp/cloudflared" "${CF_RELEASE_BASE}/${CF_ASSET}"; then
-        rm -rf "$tmp"; err "cloudflared 下载失败。"; return 1
+    info "下载固定版 cloudflared $CLOUDFLARED_VERSION ($CF_ASSET，最长等180秒)..."
+    _s2="$(date +%s)"
+    if ! curl -fL --retry 3 --connect-timeout 15 --max-time 180 -o "$tmp/cloudflared" "${CF_RELEASE_BASE}/${CF_ASSET}"; then
+        rm -rf "$tmp"; err "cloudflared 下载失败（网络不通或超时）。"; return 1
     fi
+    info "cloudflared 下载完成，耗时 $(( $(date +%s) - _s2 )) 秒。"
     # cloudflared release has no official SHA-256 manifest; verify executable and exact version.
     chmod +x "$tmp/cloudflared"
     if ! "$tmp/cloudflared" version 2>/dev/null | grep -Fq "$CLOUDFLARED_VERSION"; then
@@ -1225,7 +1254,7 @@ setup_persistent() {
     if [ -d /root/.cloudflared ] || [ -n "$TUNNEL_ID" ]; then
         say ""
         warn '检测到已有 Cloudflare 配置（授权/凭据）。'
-        read -r -p '删除全部 Cloudflare 配置并重新登录？[y/N]: ' cfans
+        safe_read cfans '删除全部 Cloudflare 配置并重新登录？[y/N]: ' ''
         case "$cfans" in
             y|Y) cf_full_cleanup || { MODE="$old_mode"; return 1; } ;;
             *) info '保留现有配置，复用授权文件与隧道。' ;;
@@ -1379,7 +1408,7 @@ config_menu() {
         say '3) 重新生成节点信息'
         say '4) 手动编辑配置文件（vi/vim，保存后自动校验重启生效）'
         say '0) 返回主菜单'
-        read -r -p '请选择: ' menu
+        safe_read menu '请选择: ' ''
         case "$menu" in
             1)
                 configure_xray || { pause_screen; continue; }
@@ -1391,7 +1420,7 @@ config_menu() {
                 configure_tunnel || { pause_screen; continue; }
                 if [ "$MODE" = "persistent" ] && [ "$DOMAIN" != "$old_domain" ]; then
                     warn "域名改变后必须同步 Cloudflare DNS 路由，否则新域名不会生效。"
-                    read -r -p "现在执行 route dns 更新？[y/N]: " answer
+                    safe_read answer '现在执行 route dns 更新？[y/N]: ' ''
                     case "$answer" in y|Y) route_domain || true ;; esac
                 fi
                 apply_config_now || true
@@ -1426,7 +1455,7 @@ manual_edit_config() {
     say '  4) 编辑 ShadowQuic SOCKS 出站配置'
     say '  5) 切换 ShadowQuic 出站模式（direct/socks）'
     say '  0) 返回'
-    read -r -p '请选择: ' m
+    safe_read m '请选择: ' ''
     local sq_file
     case "${m:-0}" in
         1) "$editor" "$XRAY_CONFIG" && apply_config_now || true ;;
@@ -1434,7 +1463,7 @@ manual_edit_config() {
         3) [ -f "$SQ_APP_DIR/server-direct.yaml" ] && "$editor" "$SQ_APP_DIR/server-direct.yaml" && sq_start || warn 'ShadowQuic 尚未安装。' ;;
         4) [ -f "$SQ_APP_DIR/server-socks.yaml" ] && "$editor" "$SQ_APP_DIR/server-socks.yaml" || warn 'ShadowQuic 尚未安装。' ;;
         5)
-            read -r -p "当前模式：$(cat "$SQ_APP_DIR/last-mode" 2>/dev/null || echo direct)，切换到 [direct/socks]: " mm
+            safe_read mm "当前模式：$(cat "$SQ_APP_DIR/last-mode" 2>/dev/null || echo direct)，切换到 [direct/socks]: " 
             case "$mm" in
                 direct|socks)
                     echo "$mm" > "$SQ_APP_DIR/last-mode"
@@ -1452,7 +1481,7 @@ manual_edit_config() {
 uninstall_plus() {
     need_root || return 1
     warn "这里只会删除 Suoha Plus（$APP_DIR 和独立服务），不会删除原 suoha.sh、/opt/suoha 或 Cloudflare 授权目录。"
-    read -r -p '确认卸载请输入 UNINSTALL: ' answer
+    safe_read answer '确认卸载请输入 UNINSTALL: ' ''
     [ "$answer" = "UNINSTALL" ] || { info '已取消。'; return 0; }
     stop_services 2>/dev/null || true
     remove_systemd_units
@@ -1518,16 +1547,16 @@ uninstall_menu() {
         say '2) 仅删除 Cloudflare Tunnel 服务（保留 Xray）'
         say '3) 删除全部 Suoha Plus（原 suoha.sh 不受影响）'
         say '0) 返回主菜单'
-        read -r -p '请选择: ' menu
+        safe_read menu '请选择: ' ''
         case "$menu" in
             1)
-                read -r -p '确认删除 Xray 服务？[y/N]: ' answer
+                safe_read answer '确认删除 Xray 服务？[y/N]: ' ''
                 case "$answer" in
                     y|Y) uninstall_component xray; pause_screen ;;
                 esac
                 ;;
             2)
-                read -r -p '确认删除 Cloudflare Tunnel 服务？[y/N]: ' answer
+                safe_read answer '确认删除 Cloudflare Tunnel 服务？[y/N]: ' ''
                 case "$answer" in
                     y|Y) uninstall_component tunnel; pause_screen ;;
                 esac
@@ -1549,7 +1578,7 @@ service_menu() {
         say '3) 重启 Xray + 隧道，并实时刷新节点'
         say '4) 查看节点信息'
         say '0) 返回主菜单'
-        read -r -p '请选择: ' menu
+        safe_read menu '请选择: ' ''
         case "$menu" in
             1)
                 if start_xray; then
@@ -1612,10 +1641,14 @@ sq_download_bin() {
     local ver="$1" asset tmp
     asset="$(sq_arch_asset)" || { err "当前架构不支持：$(uname -m)"; return 1; }
     tmp="$(mktemp /tmp/.sq.dl.XXXXXX)" || return 1
-    info "下载 shadowquic $ver ($asset)..."
-    if ! curl -fsSL --max-time 120 -o "$tmp" "https://github.com/spongebob888/shadowquic/releases/download/$ver/$asset" 2>/dev/null; then
-        rm -f "$tmp"; err '下载失败，请检查网络。'; return 1
+    info "下载 shadowquic $ver ($asset，约13MB，最长等120秒)..."
+    _dl0="$(date +%s)"
+    if ! curl -fsSL --max-time 120 --connect-timeout 15 -o "$tmp" "https://github.com/spongebob888/shadowquic/releases/download/$ver/$asset" 2>/dev/null; then
+        rm -f "$tmp"
+        err '下载失败（网络不通或超时），请检查到 github.com 的连通性。'
+        return 1
     fi
+    info "下载完成，耗时 $(( $(date +%s) - _dl0 )) 秒。"
     if [ "$(head -c 4 "$tmp" 2>/dev/null)" != "$(printf '\x7f\x45\x4c\x46')" ]; then
         rm -f "$tmp"; err '下载内容不是有效的 ELF 可执行文件。'; return 1
     fi
@@ -1651,7 +1684,7 @@ sq_upgrade() {
     if [ "$rc" = "0" ]; then return 0; fi
     [ "$rc" = "2" ] || return 1
     latest="$(sq_latest_version)" || { err '无法获取最新版本。'; return 1; }
-    read -r -p "确认升级到 $latest？[y/N]: " yn
+    safe_read yn "确认升级到 $latest？[y/N]: " ''
     case "$yn" in y|Y) : ;; *) info '已取消。'; return 0 ;; esac
     sq_download_bin "$latest" || return 1
     sq_start && ok '升级完成，服务已重启。'
@@ -1895,7 +1928,7 @@ sq_setup() {
         if [ "v${cur#v}" = "$ver" ]; then
             info '已是最新版本，跳过下载。'
         else
-            read -r -p "是否升级到 $ver？[Y/n]: " up_yn
+            safe_read up_yn "是否升级到 $ver？[Y/n]: " 'y'
             case "${up_yn:-y}" in
                 n|N) info "保留当前版本 ${cur:-unknown}。" ;;
                 *) sq_download_bin "$ver" || return 1 ;;
@@ -2007,7 +2040,7 @@ sq_menu() {
         say '7) 卸载 ShadowQuic'
         say '8) 检查更新 / 升级到最新版本'
         say '0) 返回主菜单'
-        read -r -p '请选择 [0]: ' m
+        safe_read m '请选择 [0]: ' '0'
         case "${m:-0}" in
             1) sq_setup; pause_screen ;;
             8) sq_upgrade; pause_screen ;;
@@ -2016,7 +2049,7 @@ sq_menu() {
             4) sq_start; sq_status_line; pause_screen ;;
             5) [ -f "$SQ_APP_DIR/server-direct.yaml" ] && sq_show_info || warn '尚未安装。'; pause_screen ;;
             6) tail -n 30 "$SQ_LOG" 2>/dev/null || warn '无日志。'; pause_screen ;;
-            7) read -r -p '确认卸载 ShadowQuic？[y/N]: ' yn; case "$yn" in y|Y) sq_remove ;; *) warn '已取消。' ;; esac; pause_screen ;;
+            7) safe_read yn '确认卸载 ShadowQuic？[y/N]: ' ''; case "$yn" in y|Y) sq_remove ;; *) warn '已取消。' ;; esac; pause_screen ;;
             0) break ;;
             *) warn '无效选项。'; sleep 1 ;;
         esac
@@ -2042,8 +2075,8 @@ main_menu() {
         say '7) 卸载管理（删除 Xray / 隧道 / 全部）'
         say '8) 安装/管理 ShadowQuic（QUIC 代理，UDP，可选模块）'
         say '0) 退出'
-        read -r -p '请选择 [0]: ' menu
-        case "${menu:-0}" in
+        safe_read m '请选择 [0]: ' '0'
+        case "${m:-0}" in
             1) setup_quick; pause_screen ;;
             2) setup_persistent; pause_screen ;;
             3) setup_reality; pause_screen ;;
