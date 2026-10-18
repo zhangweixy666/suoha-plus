@@ -138,10 +138,11 @@ bash /root/suoha-manager.sh
 5) 查看客户端接入信息
 6) 查看日志（末 30 行）
 7) 卸载 ShadowQuic
+8) 检查更新 / 升级到最新版本
 ```
 
 - 安装时默认：UDP `1443`、随机用户名/密码、SNI 伪装 `www.apple.com`、直连出站
-- 二进制来自 [spongebob888/shadowquic](https://github.com/spongebob888/shadowquic) 官方 release（x86_64 musl 静态编译，ELF 校验后安装）
+- 二进制来自 [spongebob888/shadowquic](https://github.com/spongebob888/shadowquic) 二进制来自 spongebob888/shadowquic 官方 release，按 `uname -m` 自动匹配 x86_64 / aarch64 / armv7 / i686 的 musl 静态版本；安装前做 ELF 魔数校验，安装时做真实执行验证。每次进入安装菜单都会查询上游最新版本，已是最新版则跳过下载，有新版会询问是否升级；也可在菜单 8 手动检查更新。
 - 安装完成自动输出三种接入方式：**sq:// 分享链接**、Clash.Meta/mihomo YAML、官方客户端 YAML
 
 **sq:// 分享链接格式**（部分客户端如 QuicProxy、husi、nekobox 支持直接导入）：
@@ -243,6 +244,8 @@ Xray：菜单 5→4 编辑保存即自动校验重启；ShadowQuic：菜单 5→
 ShadowQuic 在菜单 `8 → 7` 单独卸载。
 
 ## 📜 版本
+- **v2.4.0**：修复 OpenRC（Alpine）环境下状态显示与健康检测失效；管理命令 `suoha-plus` 现在会真实创建；ShadowQuic 支持 aarch64/armv7/i686 多架构并新增「检查更新/升级」菜单项，每次安装都会比对最新版；修复 Reality 模式下无法停止 OpenRC 服务；公网 IP 探测改为进程内缓存；新增安装并发互斥锁与日志自动轮转。仓库新增 `test/` 测试套件（静态 + 行为 + 卸载沙箱）。
+
 - **v2.3.2**：Xray 下载增加官方 `.dgst` SHA-256 完整性校验，校验文件缺失或哈希不符时拒绝安装；OpenRC 的 Xray / cloudflared 守护脚本每次启动均自动重建日志目录，避免外部日志清理任务删除目录后影响服务；重装持久化 Tunnel 的清理操作改为仅删除 Suoha Plus 已知 Tunnel 的本地凭据与配置，绝不再清空 `/root/.cloudflared` 中其他项目的授权或凭据。
 
 - **v2.3.1**：修复 ShadowQuic 守护脚本缺失时静默启动失败（启动前自动重建 daemon/init 服务，并接管清理旧版 shadowquic 自启注册）；修复组件卸载在 OpenRC 下残留 init.d 脚本与自启注册的问题；`--version/--help` 在管道模式下不再误触发自重放；重启后隧道健康探测增加重试，消除「刚重启连接未就绪即误报异常」；配置位置显示优化（无隧道配置时不再显示空管道符）；修复管道自重放循环（SUOHA_TTY 标记未检查导致二次重放/死循环）
@@ -254,6 +257,24 @@ ShadowQuic 在菜单 `8 → 7` 单独卸载。
 - **v2.1.0**：Reality 直连节点（XTLS Vision，双栈 v4/v6，与 WS 隧道共存）；WS 优选域名默认 `www.visa.com`；运行状态 `●/○` 显示 + 健康检测；修复 x25519 新版输出解析；NAT/纯 IPv6 机器适配
 - **v2.0.0**：suoha-plus 独立版；固定版本；Quick/持久化双隧道；自动节点刷新
 - **v1.x**：原 suoha.sh 系列功能
+
+## 🧪 测试
+
+仓库自带测试套件，无需 root，不影响本机已有的 Suoha Plus 安装：
+
+```sh
+sh test/run.sh
+```
+
+包含三个套件：
+
+| 套件 | 作用 |
+|------|------|
+| `test/test_static.sh` | 静态断言：版本一致性、修复特征存在、原有特性未回归 |
+| `test/test_behavior.sh` | 行为测试：提取真实函数到沙箱执行，验证架构映射、IP 缓存、日志轮转等 |
+| `test/test_uninstall.sh` | 卸载沙箱：验证服务单元清理完整、不误删外部共享资源 |
+
+测试脚本自动定位仓库内主脚本，也可指定路径：`sh test/run.sh /path/to/suoha-manager.sh`。
 
 ## 📄 许可
 

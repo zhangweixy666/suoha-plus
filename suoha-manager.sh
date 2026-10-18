@@ -38,7 +38,7 @@ if [ -z "${SUOHA_TTY:-}" ] && [ ! -t 0 ] && [ "$#" -eq 0 ]; then
 fi
 
 APP_NAME="suoha-plus"
-APP_VERSION="2.3.2"
+APP_VERSION="2.4.0"
 APP_DIR="/opt/suoha-plus"
 BIN_DIR="$APP_DIR/bin"
 LOG_DIR="$APP_DIR/logs"
@@ -54,6 +54,7 @@ CF_LOG="$LOG_DIR/cloudflared.log"
 XRAY_PID="$APP_DIR/xray.pid"
 CF_PID="$APP_DIR/cloudflared.pid"
 CMD_LINK="/usr/local/bin/suoha-plus"
+LOCK_FILE="/tmp/suoha-plus.lock"
 SERVICE_XRAY="suoha-plus-xray.service"
 SERVICE_CF="suoha-plus-cloudflared.service"
 
@@ -227,6 +228,14 @@ has_systemd() {
     [ -d /run/systemd/system ] && command_exists systemctl
 }
 
+service_unit_exists() {
+    local unit="$1"
+    [ -n "$unit" ] || return 1
+    [ -f "/etc/systemd/system/$unit" ] && return 0
+    [ -f "/etc/init.d/${unit%.service}" ] && return 0
+    return 1
+}
+
 has_openrc() {
     ! has_systemd && command_exists rc-update && [ -d /etc/init.d ] && command_exists rc-service
 }
@@ -371,6 +380,19 @@ validate_reality() {
         err "Reality shortId 必须是 0-f 的偶数长度十六进制（最长16位）。"; return 1
     fi
     return 0
+}
+
+rotate_log() {
+    local f="$1" max="${2:-10485760}" sz
+    [ -f "$f" ] || return 0
+    sz="$(wc -c < "$f" 2>/dev/null || printf 0)"
+    [ "$sz" -gt "$max" ] 2>/dev/null || return 0
+    tail -c 1048576 "$f" > "$f.rot" 2>/dev/null && mv -f "$f.rot" "$f" 2>/dev/null || true
+}
+
+rotate_all_logs() {
+    rotate_log "$XRAY_LOG" 10485760
+    rotate_log "$CF_LOG" 10485760
 }
 
 write_xray_config() {
@@ -631,6 +653,16 @@ print_nodes() {
 
 pid_running() { [ -r "$1" ] && kill -0 "$(cat "$1" 2>/dev/null)" 2>/dev/null; }
 
+SCRIPT_SELF="${SUOHA_SELF:-$0}"
+
+install_cmd_link() {
+    [ -n "$SCRIPT_SELF" ] || return 0
+    [ -f "$SCRIPT_SELF" ] || return 0
+    mkdir -p "$(dirname "$CMD_LINK")" 2>/dev/null || true
+    ln -sf "$SCRIPT_SELF" "$CMD_LINK" 2>/dev/null || true
+    return 0
+}
+
 stop_pid() {
     local file="$1" pid i
     if [ -r "$file" ]; then
@@ -723,12 +755,15 @@ start_persistent_tunnel() {
 }
 
 stop_services() {
-    if [ "$MODE" = "persistent" ] && has_systemd; then
-        systemctl stop "$SERVICE_CF" 2>/dev/null || true
-        systemctl stop "$SERVICE_XRAY" 2>/dev/null || true
-    elif [ "$MODE" = "persistent" ] && has_openrc; then
-        rc-service suoha-plus-cloudflared stop 2>/dev/null || true
-        rc-service suoha-plus-xray stop 2>/dev/null || true
+    if service_unit_exists "$SERVICE_CF" || service_unit_exists "$SERVICE_XRAY"; then
+        if has_systemd; then
+            systemctl stop "$SERVICE_CF" 2>/dev/null || true
+            systemctl stop "$SERVICE_XRAY" 2>/dev/null || true
+        fi
+        if has_openrc; then
+            rc-service suoha-plus-cloudflared stop 2>/dev/null || true
+            rc-service suoha-plus-xray stop 2>/dev/null || true
+        fi
     fi
     stop_pid "$CF_PID"
     stop_pid "$XRAY_PID"
@@ -1050,25 +1085,32 @@ setup_reality() {
     save_state
     generate_nodes
     print_nodes
+    install_cmd_link
     ok "Reality 直连节点安装完成；管理命令：$CMD_LINK"
 }
 
+_IP4_CACHE=""
+_IP6_CACHE=""
+
 public_ip() {
+    if [ -n "$_IP4_CACHE" ]; then printf '%s' "$_IP4_CACHE"; return 0; fi
     local ip
     ip="$(curl -fsS4 --max-time 5 https://api.ipify.org 2>/dev/null || true)"
     [ -n "$ip" ] || ip="$(curl -fsS4 --max-time 5 https://ifconfig.me 2>/dev/null || true)"
+    _IP4_CACHE="$ip"
     printf '%s' "$ip"
 }
 
 public_ip6() {
+    if [ -n "$_IP6_CACHE" ]; then printf '%s' "$_IP6_CACHE"; return 0; fi
     local ip
     ip="$(curl -fsS6 --max-time 5 https://api64.ipify.org 2>/dev/null || true)"
     if [ -z "$ip" ]; then
         ip="$(ip -6 addr show scope global 2>/dev/null | grep -o 'inet6 [0-9a-f:]*' | awk '{print $2}' | grep -v '^fe80' | head -n 1)"
     fi
+    _IP6_CACHE="$ip"
     printf '%s' "$ip"
 }
-
 reality_default_address() {
     local ip6 ip4
     ip6="$(public_ip6 2>/dev/null || true)"
@@ -1135,6 +1177,7 @@ setup_persistent() {
     save_state
     generate_nodes
     print_nodes
+    install_cmd_link
     ok "持久化服务安装完成；管理命令：$CMD_LINK"
 }
 
@@ -1172,6 +1215,14 @@ status_line() {
         st="$(systemctl is-active "$unit" 2>/dev/null || printf 'unknown')"
         pid="$(systemctl show -p MainPID --value "$unit" 2>/dev/null)"
         [ "$pid" = "0" ] && pid=""
+    elif has_openrc && service_unit_exists "$unit"; then
+        st="$(rc-service "${unit%.service}" status 2>&1 || true)"
+        case "$st" in
+            *started*) st="running" ;;
+            *crashed*) st="crashed" ;;
+            *) st="stopped" ;;
+        esac
+        pid="$(cat "$pidfile" 2>/dev/null || true)"
     elif pid_running "$pidfile"; then
         st="running"
         pid="$(cat "$pidfile" 2>/dev/null)"
@@ -1188,8 +1239,20 @@ status_line() {
 health_check() {
     # 只在服务声称运行时做实测：Reality 端口监听 / 隧道 WS 链路探测
     local xray_alive=0 cf_alive=0
-    { pid_running "$XRAY_PID" || { [ "$MODE" = "persistent" ] && has_systemd && [ "$(systemctl is-active "$SERVICE_XRAY" 2>/dev/null)" = "active" ]; }; } && xray_alive=1
-    { pid_running "$CF_PID" || { [ "$MODE" = "persistent" ] && has_systemd && [ "$(systemctl is-active "$SERVICE_CF" 2>/dev/null)" = "active" ]; }; } && cf_alive=1
+    if pid_running "$XRAY_PID"; then
+        xray_alive=1
+    elif has_systemd && [ "$(systemctl is-active "$SERVICE_XRAY" 2>/dev/null)" = "active" ]; then
+        xray_alive=1
+    elif has_openrc && service_unit_exists "$SERVICE_XRAY"; then
+        case "$(rc-service suoha-plus-xray status 2>&1 || true)" in *started*) xray_alive=1 ;; esac
+    fi
+    if pid_running "$CF_PID"; then
+        cf_alive=1
+    elif has_systemd && [ "$(systemctl is-active "$SERVICE_CF" 2>/dev/null)" = "active" ]; then
+        cf_alive=1
+    elif has_openrc && service_unit_exists "$SERVICE_CF"; then
+        case "$(rc-service suoha-plus-cloudflared status 2>&1 || true)" in *started*) cf_alive=1 ;; esac
+    fi
     if [ "$xray_alive" = "0" ] && [ "$cf_alive" = "0" ]; then
         return 0
     fi
@@ -1335,7 +1398,7 @@ uninstall_component() {
         if has_openrc; then
             rc-service suoha-plus-xray stop >/dev/null 2>&1 || true
             rc-update del suoha-plus-xray default >/dev/null 2>&1 || true
-            rm -f /etc/init.d/suoha-plus-xray /usr/local/bin/suoha-xray-daemon.sh
+            rm -f /etc/init.d/suoha-plus-xray /etc/init.d/suoha-xray-old /usr/local/bin/suoha-xray-daemon.sh
         fi
         stop_pid "$XRAY_PID"
         rm -f "$XRAY_BIN" "$XRAY_CONFIG" "$XRAY_CONFIG.bak" "$XRAY_PID"
@@ -1448,6 +1511,77 @@ SQ_CMD="/usr/local/bin/suoha-quic"
 
 sq_installed() { [ -x "$SQ_BIN" ]; }
 
+sq_arch_asset() {
+    case "$(uname -m)" in
+        x86_64|amd64)  printf '%s' 'shadowquic-x86_64-linux-musl' ;;
+        aarch64|arm64) printf '%s' 'shadowquic-aarch64-linux-musl' ;;
+        armv7l|armv7)  printf '%s' 'shadowquic-armv7-linux-muslhf' ;;
+        i686|i386)     printf '%s' 'shadowquic-i686-linux-musl' ;;
+        *) return 1 ;;
+    esac
+}
+
+sq_local_version() {
+    [ -x "$SQ_BIN" ] || return 0
+    "$SQ_BIN" --version 2>/dev/null | head -n 1 | grep -Eo 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -n 1
+}
+
+sq_latest_version() {
+    local v
+    v="$(curl -sL --max-time 8 https://api.github.com/repos/spongebob888/shadowquic/releases/latest 2>/dev/null | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
+    [ -n "$v" ] || return 1
+    printf '%s' "$v"
+}
+
+sq_download_bin() {
+    local ver="$1" asset tmp
+    asset="$(sq_arch_asset)" || { err "当前架构不支持：$(uname -m)"; return 1; }
+    tmp="$(mktemp /tmp/.sq.dl.XXXXXX)" || return 1
+    info "下载 shadowquic $ver ($asset)..."
+    if ! curl -fsSL --max-time 120 -o "$tmp" "https://github.com/spongebob888/shadowquic/releases/download/$ver/$asset" 2>/dev/null; then
+        rm -f "$tmp"; err '下载失败，请检查网络。'; return 1
+    fi
+    if [ "$(head -c 4 "$tmp" 2>/dev/null)" != "$(printf '\x7f\x45\x4c\x46')" ]; then
+        rm -f "$tmp"; err '下载内容不是有效的 ELF 可执行文件。'; return 1
+    fi
+    chmod +x "$tmp"
+    if ! timeout 10 "$tmp" --version >/dev/null 2>&1 && ! timeout 10 "$tmp" -V >/dev/null 2>&1; then
+        rm -f "$tmp"; err '二进制无法执行（可能架构不匹配）。'; return 1
+    fi
+    mkdir -p "$(dirname "$SQ_BIN")" || { rm -f "$tmp"; return 1; }
+    mv -f "$tmp" "$SQ_BIN"
+    ok "shadowquic $ver 已安装"
+}
+
+sq_check_update() {
+    local latest local_v
+    latest="$(sq_latest_version)" || { warn '无法获取最新版本（网络问题）。'; return 1; }
+    local_v="$(sq_local_version)"
+    [ -n "$local_v" ] || local_v="unknown"
+    say "当前版本：$local_v    最新版本：$latest"
+    if [ "v${local_v#v}" = "$latest" ]; then
+        ok '已是最新版本。'
+        return 0
+    fi
+    return 2
+}
+
+sq_upgrade() {
+    need_root || return 1
+    local latest rc
+    if ! sq_installed; then
+        err 'ShadowQuic 尚未安装，请先安装。'; return 1
+    fi
+    sq_check_update; rc=$?
+    if [ "$rc" = "0" ]; then return 0; fi
+    [ "$rc" = "2" ] || return 1
+    latest="$(sq_latest_version)" || { err '无法获取最新版本。'; return 1; }
+    read -r -p "确认升级到 $latest？[y/N]: " yn
+    case "$yn" in y|Y) : ;; *) info '已取消。'; return 0 ;; esac
+    sq_download_bin "$latest" || return 1
+    sq_start && ok '升级完成，服务已重启。'
+}
+
 sq_detect_service() {
     # 返回 "systemd" / "openrc" / "manual"，同时识别旧的 shadowquic 服务名（兼容接管）
     if has_systemd && { [ -f "$SQ_UNIT" ] || [ -f /etc/systemd/system/shadowquic.service ] || ls /lib/systemd/system/shadowquic* >/dev/null 2>&1; }; then
@@ -1466,9 +1600,33 @@ sq_random() {
     head -c 32 /dev/urandom | base64 | tr -d '=+/' | cut -c1-"$1"
 }
 
+sq_marker_path() { printf '%s' "$SQ_APP_DIR/.managed-by-suoha-plus"; }
+
+sq_owned() {
+    [ -f "$(sq_marker_path)" ] && return 0
+    # 目录不存在或为空 → 无主，可接管
+    if [ ! -d "$SQ_APP_DIR" ]; then return 0; fi
+    if [ -z "$(ls -A "$SQ_APP_DIR" 2>/dev/null)" ]; then return 0; fi
+    return 1
+}
+
+sq_foreign_owner() {
+    [ -f "$SQ_APP_DIR/.managed-by-warp-go" ] && { printf '%s' 'warp-'; return 0; }
+    return 1
+}
+
 sq_write_configs() {
     local u="$1" p="$2" sq_sn="$3" sq_up="$4"
     mkdir -p "$SQ_APP_DIR"
+    if [ -f "$SQ_APP_DIR/server-direct.yaml" ] && ! sq_owned; then
+        local who
+        who="$(sq_foreign_owner 2>/dev/null || true)"
+        warn "检测到 ${who:-其他项目} 的 ShadowQuic 配置，已备份后覆盖。"
+        cp -f "$SQ_APP_DIR/server-direct.yaml" "$SQ_APP_DIR/server-direct.yaml.bak-suoha.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+    fi
+    if [ -f "$SQ_APP_DIR/server-socks.yaml" ] && ! sq_owned; then
+        cp -f "$SQ_APP_DIR/server-socks.yaml" "$SQ_APP_DIR/server-socks.yaml.bak-suoha.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+    fi
     cat > "$SQ_APP_DIR/server-direct.yaml" <<EOF
 inbound:
   type: shadowquic
@@ -1518,6 +1676,7 @@ outbound:
 log-level: warn
 EOF
     echo direct > "$SQ_APP_DIR/last-mode"
+    : > "$(sq_marker_path)"
 }
 
 sq_write_service() {
@@ -1616,6 +1775,8 @@ sq_status_line() {
     local st="未运行"
     if has_systemd && [ -f "$SQ_UNIT" ]; then
         [ "$(systemctl is-active suoha-shadowquic 2>/dev/null)" = "active" ] && st="运行中"
+    elif has_openrc && [ -f "$SQ_INIT" ]; then
+        case "$(rc-service suoha-shadowquic status 2>&1 || true)" in *started*) st="运行中" ;; esac
     elif pgrep -f '[s]hadowquic' >/dev/null 2>&1; then
         st="运行中"
     fi
@@ -1646,25 +1807,24 @@ sq_setup() {
     sq_pass="$(ask_default '密码' "$(sq_random 16)")"
     sq_sn="$(ask_default 'SNI 伪装域名' "$REALITY_SNI")"
     sq_up="$(ask_default 'JLS upstream（域名:端口，需与客户端 server-name 一致）' "$REALITY_DEST")"
-    # 二进制
-    if ! sq_installed; then
-        local ver
-        info '获取 shadowquic 最新版本...'
-        ver="$(curl -sL --max-time 8 https://api.github.com/repos/spongebob888/shadowquic/releases/latest | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
-        [ -n "$ver" ] || ver="$SQ_VERSION_FALLBACK"
-        info "下载 shadowquic $ver ..."
-        if curl -fsSL --max-time 120 -o /tmp/.sq.dl "https://github.com/spongebob888/shadowquic/releases/download/$ver/shadowquic-x86_64-linux-musl" 2>/dev/null; then
-            if [ "$(head -c 4 /tmp/.sq.dl 2>/dev/null)" = "$(printf '\x7f\x45\x4c\x46')" ]; then
-                chmod +x /tmp/.sq.dl && mv -f /tmp/.sq.dl "$SQ_BIN"
-                ok "shadowquic 安装完成"
-            else
-                rm -f /tmp/.sq.dl; err '下载内容不是有效的 ELF 可执行文件。'; return 1
-            fi
+    # 二进制：每次都检查最新版，有新版本则询问是否升级
+    local ver cur
+    info '检查 shadowquic 版本...'
+    ver="$(sq_latest_version)" || ver="$SQ_VERSION_FALLBACK"
+    cur="$(sq_local_version)"
+    if sq_installed; then
+        info "当前版本：${cur:-unknown}，最新版本：$ver"
+        if [ "v${cur#v}" = "$ver" ]; then
+            info '已是最新版本，跳过下载。'
         else
-            rm -f /tmp/.sq.dl; err '下载失败，请检查网络。'; return 1
+            read -r -p "是否升级到 $ver？[Y/n]: " up_yn
+            case "${up_yn:-y}" in
+                n|N) info "保留当前版本 ${cur:-unknown}。" ;;
+                *) sq_download_bin "$ver" || return 1 ;;
+            esac
         fi
     else
-        info 'shadowquic 二进制已存在，跳过下载。'
+        sq_download_bin "$ver" || return 1
     fi
     # 配置 + 服务 + 启动
     sq_write_configs "$sq_user" "$sq_pass" "$sq_sn" "$sq_up"
@@ -1745,7 +1905,13 @@ sq_remove() {
     fi
     rc-update del suoha-shadowquic default >/dev/null 2>&1 || true
     rm -f "$SQ_INIT" /usr/local/bin/suoha-quic-daemon.sh
-    rm -rf "$SQ_APP_DIR"
+    if sq_owned; then
+        rm -f "$SQ_APP_DIR/server-direct.yaml" "$SQ_APP_DIR/server-socks.yaml" \
+              "$SQ_APP_DIR/last-mode" "$(sq_marker_path)" 2>/dev/null || true
+        rmdir "$SQ_APP_DIR" 2>/dev/null || true
+    else
+        warn "$SQ_APP_DIR 不属于 Suoha Plus，已保留配置不动。"
+    fi
     ok 'ShadowQuic 已卸载（二进制保留在 /usr/local/bin/shadowquic，如需删除请手动）'
 }
 
@@ -1761,10 +1927,12 @@ sq_menu() {
         say '5) 查看客户端接入信息'
         say '6) 查看日志（末 30 行）'
         say '7) 卸载 ShadowQuic'
+        say '8) 检查更新 / 升级到最新版本'
         say '0) 返回主菜单'
         read -r -p '请选择 [0]: ' m
         case "${m:-0}" in
             1) sq_setup; pause_screen ;;
+            8) sq_upgrade; pause_screen ;;
             2) sq_start; sq_status_line; pause_screen ;;
             3) sq_stop_process; ok 'ShadowQuic 已停止。'; pause_screen ;;
             4) sq_start; sq_status_line; pause_screen ;;
@@ -1832,4 +2000,9 @@ EOF
 esac
 
 load_state
+if command_exists flock; then
+    if exec 9>"$LOCK_FILE" 2>/dev/null; then
+        flock -n 9 2>/dev/null || { err '另一个 Suoha Plus 实例正在运行，请稍后重试。'; exit 1; }
+    fi
+fi
 main_menu
