@@ -38,7 +38,7 @@ if [ -z "${SUOHA_TTY:-}" ] && [ ! -t 0 ] && [ "$#" -eq 0 ]; then
 fi
 
 APP_NAME="suoha-plus"
-APP_VERSION="2.4.5"
+APP_VERSION="2.5.0"
 APP_DIR="/opt/suoha-plus"
 BIN_DIR="$APP_DIR/bin"
 LOG_DIR="$APP_DIR/logs"
@@ -142,8 +142,11 @@ banner() {
 }
 
 pause_screen() {
+    # 用 IFS= read -r 读一行；stdin 关闭时直接返回（不卡住、不吞后续输入）
     printf '\n按回车继续...' >&2
-    read -r _
+    IFS= read -r _dummy 2>/dev/null || true
+    printf '\n' >&2
+    return 0
 }
 
 ask_default() {
@@ -179,6 +182,31 @@ safe_read() {
 
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
+# 当前已安装情况的简短描述；未安装返回空串。
+installed_desc() {
+    local parts=""
+    [ -f "$STATE_FILE" ] || [ -f "$XRAY_CONFIG" ] && parts="Suoha Plus"
+    if [ -f "$SQ_APP_DIR/server-direct.yaml" ]; then
+        if [ -n "$parts" ]; then parts="$parts + ShadowQuic"; else parts="ShadowQuic"; fi
+    fi
+    printf '%s' "$parts"
+}
+
+# 重装确认。返回 0 = 继续覆盖，1 = 放弃。都没装则直接返回 0。
+confirm_overwrite() {
+    local target="$1" desc
+    desc="$(installed_desc)"
+    [ -n "$desc" ] || return 0
+    say ""
+    warn "检测到已安装：$desc"
+    info "继续会覆盖现有 $target 配置与服务（节点链接会重新生成）。"
+    local ans=""
+    safe_read ans "是否覆盖重装？[Y/n]: " "y"
+    case "$ans" in
+        n|N|no|NO) info "已取消，未做任何修改。"; return 1 ;;
+    esac
+    return 0
+}
 need_root() {
     if [ "$(id -u)" != "0" ]; then
         err "此脚本需要 root 权限，请使用 root 或 sudo 运行。"
@@ -649,10 +677,10 @@ generate_nodes() {
             printf '# 隧道尚未启动，启动成功后再次运行本脚本即可生成节点。\n'
         elif [ "$PROTOCOL" = "vmess" ]; then
             json="$(printf '{"v":"2","ps":"%s_tls","add":"%s","port":"443","id":"%s","aid":"0","net":"ws","type":"none","host":"%s","path":"%s","tls":"tls","sni":"%s"}' "$ISP_TAG" "$NODE_ADDRESS" "$UUID" "$host" "$WS_PATH" "$host")"
-            printf 'vmess://%s\n' "$(printf '%s' "$json" | base64_no_wrap | fold -w 76)"
+            printf 'vmess://%s\n' "$(printf '%s' "$json" | base64_no_wrap)"
             printf '\n# TLS 端口可尝试：443、2053、2083、2087、2096、8443\n'
             json="$(printf '{"v":"2","ps":"%s","add":"%s","port":"80","id":"%s","aid":"0","net":"ws","type":"none","host":"%s","path":"%s","tls":""}' "$ISP_TAG" "$NODE_ADDRESS" "$UUID" "$host" "$WS_PATH")"
-            printf 'vmess://%s\n' "$(printf '%s' "$json" | base64_no_wrap | fold -w 76)"
+            printf 'vmess://%s\n' "$(printf '%s' "$json" | base64_no_wrap)"
             printf '# 明文端口可尝试：80、8080、8880、2052、2082、2086、2095\n'
         else
             path_q="$(printf '%s' "$WS_PATH" | sed 's/%/%25/g; s#/#%2F#g')"
@@ -1163,6 +1191,7 @@ apply_config_now() {
 
 setup_reality() {
     need_root || return 1
+    confirm_overwrite "Reality 直连节点" || return 1
     local old_mode="$MODE" old_reality="$REALITY_ENABLED"
     stop_services 2>/dev/null || true
     remove_systemd_units
@@ -1230,6 +1259,7 @@ reality_default_address() {
 
 setup_quick() {
     need_root || return 1
+    confirm_overwrite "Quick Tunnel" || return 1
     local old_mode="$MODE"
     stop_services 2>/dev/null || true
     remove_systemd_units
@@ -1253,6 +1283,7 @@ setup_quick() {
 
 setup_persistent() {
     need_root || return 1
+    confirm_overwrite "持久化 Tunnel" || return 1
     local old_mode="$MODE"
     # 已有 Cloudflare 配置（重装场景）→ 询问是否清空重新登录
     if [ -d /root/.cloudflared ] || [ -n "$TUNNEL_ID" ]; then
