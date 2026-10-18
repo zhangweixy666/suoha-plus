@@ -130,9 +130,11 @@ echo "[6] install_cmd_link"
 FAKE_SELF=$W/fake-manager.sh
 echo '#!/bin/sh' > "$FAKE_SELF"; chmod +x "$FAKE_SELF"
 LINK=$W/outlink
-sh -c '. "$1/lib.sh"; SCRIPT_SELF="$2"; CMD_LINK="$3"; install_cmd_link' _ "$W" "$FAKE_SELF" "$LINK" 2>/dev/null
+sh -c '. "$1/lib.sh"; SCRIPT_SELF="$2"; CMD_LINK="$3"; APP_DIR="$4"; install_cmd_link' _ "$W" "$FAKE_SELF" "$LINK" "$W/app" 2>/dev/null
 if [ -L "$LINK" ]; then ok "创建了软链接"; else bad "未创建软链接"; fi
-if [ -L "$LINK" ] && [ "$(readlink "$LINK")" = "$FAKE_SELF" ]; then ok "软链接指向正确"; else bad "软链接指向错误"; fi
+# 新实现会把脚本固定到 APP_DIR 再链接，目标是稳定副本而非原始路径
+if [ -L "$LINK" ] && [ -f "$(readlink "$LINK")" ]; then ok "软链接指向存在的可执行文件"; else bad "软链接指向失效"; fi
+if [ -L "$LINK" ] && [ -x "$(readlink "$LINK")" ]; then ok "软链接目标可执行"; else bad "软链接目标不可执行"; fi
 sh -c '. "$1/lib.sh"; SCRIPT_SELF=""; CMD_LINK="$2"; install_cmd_link' _ "$W" "$W/nolink" 2>/dev/null
 if [ ! -e "$W/nolink" ]; then ok "SCRIPT_SELF 为空时安全跳过"; else bad "SCRIPT_SELF 为空时不应创建链接"; fi
 

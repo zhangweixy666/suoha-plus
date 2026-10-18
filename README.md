@@ -244,6 +244,8 @@ Xray：菜单 5→4 编辑保存即自动校验重启；ShadowQuic：菜单 5→
 ShadowQuic 在菜单 `8 → 7` 单独卸载。
 
 ## 📜 版本
+- **v2.4.2**：真机安装测试发现并修复 4 个阻断性问题：① `install_openrc_units` / `install_systemd_units` 最后一条 `[ -f ] && ok` 为假时函数返回 1，导致 Reality 安装被 `|| return 1` 误判失败、服务未启动；② OpenRC 下 `rc-service start` 的常驻进程同样继承锁 fd，装完后脚本再也打不开（现已在该路径前显式释放锁）；③ 重复安装累积多个 `supervise-daemon` 与多个 xray 实例（现在重写单元前先停旧实例，已启动时用 restart）；④ `suoha-plus` 命令因脚本无执行位而 `Permission denied`（现在 `chmod +x` 并把脚本固定到 `/opt/suoha-plus/suoha-manager.sh` 再建软链）。
+
 - **v2.4.1**：修复 v2.4.0 引入的并发锁泄露问题（后台服务继承锁文件描述符，导致装完 Xray 后脚本再也打不开）；退出清理 `trap` 现在真实生效并能删除安装临时目录；`sq_start` 不再可能启动其他项目的 `shadowquic` 服务；服务崩溃（crashed）状态单独显示，不再与「未运行」混同。新增 `test/test_regression.sh` 专门覆盖上述真实行为。
 
 - **v2.4.0**：修复 OpenRC（Alpine）环境下状态显示与健康检测失效；管理命令 `suoha-plus` 现在会真实创建；ShadowQuic 支持 aarch64/armv7/i686 多架构并新增「检查更新/升级」菜单项，每次安装都会比对最新版；修复 Reality 模式下无法停止 OpenRC 服务；公网 IP 探测改为进程内缓存；新增安装并发互斥锁与日志自动轮转。仓库新增 `test/` 测试套件（静态 + 行为 + 卸载沙箱）。

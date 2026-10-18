@@ -38,7 +38,7 @@ if [ -z "${SUOHA_TTY:-}" ] && [ ! -t 0 ] && [ "$#" -eq 0 ]; then
 fi
 
 APP_NAME="suoha-plus"
-APP_VERSION="2.4.1"
+APP_VERSION="2.4.2"
 APP_DIR="/opt/suoha-plus"
 BIN_DIR="$APP_DIR/bin"
 LOG_DIR="$APP_DIR/logs"
@@ -99,6 +99,23 @@ say() { printf '%b\n' "$*"; }
 
 # 安装过程中的临时目录（mktemp -d 创建），正常结束或异常退出都清理。
 _cleanup_paths=""
+
+# 锁释放/重建：所有会 fork 常驻服务（rc-service、systemctl、nohup）的地方
+# 必须先释放锁 fd 9，否则常驻进程会继承并永久持有它，导致本脚本再也打不开。
+lock_release() {
+    if [ -e /proc/$$/fd/9 ]; then
+        exec 9>&-
+    fi
+    return 0
+}
+
+lock_acquire() {
+    command_exists flock || return 0
+    [ -n "$LOCK_FILE" ] || return 0
+    exec 9>"$LOCK_FILE" 2>/dev/null || return 0
+    flock -n 9 2>/dev/null || return 0
+    return 0
+}
 
 cleanup_register() {
     [ -n "$1" ] || return 0
@@ -676,7 +693,20 @@ install_cmd_link() {
     [ -n "$SCRIPT_SELF" ] || return 0
     [ -f "$SCRIPT_SELF" ] || return 0
     mkdir -p "$(dirname "$CMD_LINK")" 2>/dev/null || true
-    ln -sf "$SCRIPT_SELF" "$CMD_LINK" 2>/dev/null || true
+    # 脚本可能是 curl -o 下载的（无执行位），软链过去会 Permission denied。
+    [ -x "$SCRIPT_SELF" ] || chmod +x "$SCRIPT_SELF" 2>/dev/null || true
+    # 把脚本固定一份到 APP_DIR，避免软链指向 /tmp 或临时副本后被删导致命令失效。
+    local stable="$APP_DIR/suoha-manager.sh"
+    if [ "$(cd "$(dirname "$SCRIPT_SELF")" 2>/dev/null && pwd)/$(basename "$SCRIPT_SELF")" != "$stable" ]; then
+        mkdir -p "$APP_DIR" 2>/dev/null || true
+        cp -f "$SCRIPT_SELF" "$stable" 2>/dev/null || true
+        chmod +x "$stable" 2>/dev/null || true
+    fi
+    if [ -x "$stable" ]; then
+        ln -sf "$stable" "$CMD_LINK" 2>/dev/null || true
+    else
+        ln -sf "$SCRIPT_SELF" "$CMD_LINK" 2>/dev/null || true
+    fi
     return 0
 }
 
@@ -698,11 +728,18 @@ start_xray() {
     [ -f "$XRAY_CONFIG" ] || write_xray_config || return 1
     # 只要存在服务单元（systemd/OpenRC）就由 init 管理，避免 nohup 双实例
     if has_systemd && { [ "$MODE" = "persistent" ] || [ -f "/etc/systemd/system/$SERVICE_XRAY" ]; }; then
+        lock_release
         systemctl start "$SERVICE_XRAY"
         return $?
     fi
     if has_openrc && { [ "$MODE" = "persistent" ] || [ -f "/etc/init.d/suoha-plus-xray" ]; }; then
-        rc-service suoha-plus-xray start 2>/dev/null || return 1
+        # 已 started 时用 restart，避免 supervise-daemon 再叠一个实例
+        lock_release
+        _ost="$(rc-service suoha-plus-xray status 2>&1 || true)"
+        case "$_ost" in
+            *started*) rc-service suoha-plus-xray restart >/dev/null 2>&1 || return 1 ;;
+            *) rc-service suoha-plus-xray start >/dev/null 2>&1 || return 1 ;;
+        esac
         return 0
     fi
     stop_pid "$XRAY_PID"
@@ -752,10 +789,12 @@ start_persistent_tunnel() {
     [ -f "$CF_CONFIG" ] || write_cloudflared_config || return 1
     # 单元存在则走 init 管理
     if has_systemd && { [ -f "/etc/systemd/system/$SERVICE_CF" ] || [ "$MODE" = "persistent" ]; }; then
+        lock_release
         systemctl start "$SERVICE_CF"
         return $?
     fi
     if has_openrc && { [ -f "/etc/init.d/suoha-plus-cloudflared" ] || [ "$MODE" = "persistent" ]; }; then
+        lock_release
         rc-service suoha-plus-cloudflared start 2>/dev/null || return 1
         return 0
     fi
@@ -772,15 +811,14 @@ start_persistent_tunnel() {
 }
 
 stop_services() {
-    if service_unit_exists "$SERVICE_CF" || service_unit_exists "$SERVICE_XRAY"; then
-        if has_systemd; then
-            systemctl stop "$SERVICE_CF" 2>/dev/null || true
-            systemctl stop "$SERVICE_XRAY" 2>/dev/null || true
-        fi
-        if has_openrc; then
-            rc-service suoha-plus-cloudflared stop 2>/dev/null || true
-            rc-service suoha-plus-xray stop 2>/dev/null || true
-        fi
+    if has_systemd; then
+        systemctl stop "$SERVICE_CF" 2>/dev/null || true
+        systemctl stop "$SERVICE_XRAY" 2>/dev/null || true
+    fi
+    if has_openrc; then
+        rc-service suoha-plus-cloudflared stop >/dev/null 2>&1 || true
+        rc-service suoha-plus-xray stop >/dev/null 2>&1 || true
+        pkill -f 'supervise-daemon suoha-plus-' 2>/dev/null || true
     fi
     stop_pid "$CF_PID"
     stop_pid "$XRAY_PID"
@@ -864,11 +902,24 @@ EOF
     systemctl enable "$SERVICE_XRAY" >/dev/null
     [ -f "/etc/systemd/system/$SERVICE_CF" ] && systemctl enable "$SERVICE_CF" >/dev/null
     ok "已写入独立 systemd 服务：$SERVICE_XRAY"
-    [ -f "/etc/systemd/system/$SERVICE_CF" ] && ok "已写入独立 systemd 服务：$SERVICE_CF"
+    if [ -f "/etc/systemd/system/$SERVICE_CF" ]; then
+        ok "已写入独立 systemd 服务：$SERVICE_CF"
+    fi
+    return 0
 }
 
 install_openrc_units() {
     has_openrc || return 0
+    # 重写单元前必须先停掉旧实例：OpenRC 的 supervise-daemon 不会因重写脚本
+    # 而替换已有 supervisor，反复安装会累积多个 supervise + 多个 xray 进程。
+    if [ -f /etc/init.d/suoha-plus-xray ]; then
+        rc-service suoha-plus-xray stop >/dev/null 2>&1 || true
+    fi
+    if [ -f /etc/init.d/suoha-plus-cloudflared ]; then
+        rc-service suoha-plus-cloudflared stop >/dev/null 2>&1 || true
+    fi
+    pkill -f 'supervise-daemon suoha-plus-' 2>/dev/null || true
+    sleep 1
     mkdir -p /etc/init.d || return 1
     OINIT_XRAY="/etc/init.d/suoha-plus-xray"
     OINIT_CF="/etc/init.d/suoha-plus-cloudflared"
@@ -923,7 +974,12 @@ EOF
         rm -f "$OINIT_CF" /usr/local/bin/suoha-cloudflared-daemon.sh
     fi
     ok "已写入 OpenRC 服务：suoha-plus-xray"
-    [ -f "$OINIT_CF" ] && ok "已写入 OpenRC 服务：suoha-plus-cloudflared"
+    if [ -f "$OINIT_CF" ]; then
+        ok "已写入 OpenRC 服务：suoha-plus-cloudflared"
+    fi
+    # 显式返回成功：上面最后一条 [ -f ] 在 Reality/Quick 模式下为假，
+    # 若作为函数返回值会让调用方的 `|| return 1` 误判安装失败。
+    return 0
 }
 
 remove_systemd_units() {
@@ -1766,6 +1822,7 @@ sq_start() {
             rm -f /etc/init.d/shadowquic 2>/dev/null || true
         fi
         if [ -x "$SQ_INIT" ]; then
+            lock_release
             rc-service suoha-shadowquic start >/dev/null 2>&1 || /etc/init.d/suoha-shadowquic start
         else
             warn '未找到 Suoha Plus 的 ShadowQuic 服务单元，请重新安装。'
