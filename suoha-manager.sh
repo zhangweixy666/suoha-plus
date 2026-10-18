@@ -38,7 +38,7 @@ if [ -z "${SUOHA_TTY:-}" ] && [ ! -t 0 ] && [ "$#" -eq 0 ]; then
 fi
 
 APP_NAME="suoha-plus"
-APP_VERSION="2.4.0"
+APP_VERSION="2.4.1"
 APP_DIR="/opt/suoha-plus"
 BIN_DIR="$APP_DIR/bin"
 LOG_DIR="$APP_DIR/logs"
@@ -96,6 +96,21 @@ else
 fi
 
 say() { printf '%b\n' "$*"; }
+
+# 安装过程中的临时目录（mktemp -d 创建），正常结束或异常退出都清理。
+_cleanup_paths=""
+
+cleanup_register() {
+    [ -n "$1" ] || return 0
+    _cleanup_paths="$_cleanup_paths $1"
+}
+
+cleanup_on_exit() {
+    [ -n "$_cleanup_paths" ] || return 0
+    rm -rf $_cleanup_paths 2>/dev/null || true
+    _cleanup_paths=""
+    return 0
+}
 info() { say "${C_CYAN}[信息]${C_RESET} $*"; }
 ok() { say "${C_GREEN}[完成]${C_RESET} $*"; }
 warn() { say "${C_YELLOW}[注意]${C_RESET} $*"; }
@@ -291,6 +306,7 @@ download_binaries() {
     mkdir -p "$BIN_DIR" "$TMP_DIR" || return 1
     local tmp xray_candidate
     tmp="$(mktemp -d "$TMP_DIR/download.XXXXXX")" || return 1
+    cleanup_register "$tmp"
     info "下载固定版 Xray $XRAY_VERSION ($XRAY_ASSET)..."
     if ! curl -fL --retry 3 --connect-timeout 15 -o "$tmp/xray.zip" "${XRAY_RELEASE_BASE}/${XRAY_ASSET}"; then
         rm -rf "$tmp"; err "Xray 下载失败。"; return 1
@@ -401,6 +417,7 @@ write_xray_config() {
     mkdir -p "$APP_DIR" "$LOG_DIR" || return 1
     local tmp tmpdir
     tmpdir="$(mktemp -d "$APP_DIR/.xcfg.XXXXXX")" || return 1
+    cleanup_register "$tmpdir"
     tmp="$tmpdir/config.json"
     if [ "$REALITY_ENABLED" = "yes" ]; then
         cat > "$tmp" <<EOF
@@ -689,7 +706,7 @@ start_xray() {
         return 0
     fi
     stop_pid "$XRAY_PID"
-    nohup "$XRAY_BIN" run -config "$XRAY_CONFIG" >> "$XRAY_LOG" 2>&1 < /dev/null &
+    nohup "$XRAY_BIN" run -config "$XRAY_CONFIG" >> "$XRAY_LOG" 2>&1 < /dev/null 9>&- &
     echo $! > "$XRAY_PID"
     sleep 1
     if ! pid_running "$XRAY_PID"; then
@@ -705,7 +722,7 @@ start_quick_tunnel() {
     [ -x "$CF_BIN" ] || { err "cloudflared 尚未安装。"; return 1; }
     stop_pid "$CF_PID"
     : > "$CF_LOG"
-    nohup "$CF_BIN" tunnel --url "http://127.0.0.1:$XRAY_PORT" --no-autoupdate --edge-ip-version "$EDGE_IP" --protocol "$CF_PROTOCOL" > "$CF_LOG" 2>&1 < /dev/null &
+    nohup "$CF_BIN" tunnel --url "http://127.0.0.1:$XRAY_PORT" --no-autoupdate --edge-ip-version "$EDGE_IP" --protocol "$CF_PROTOCOL" > "$CF_LOG" 2>&1 < /dev/null 9>&- &
     echo $! > "$CF_PID"
     QUICK_URL=""
     local i
@@ -743,7 +760,7 @@ start_persistent_tunnel() {
         return 0
     fi
     stop_pid "$CF_PID"
-    nohup "$CF_BIN" tunnel --config "$CF_CONFIG" run "$TUNNEL_NAME" >> "$CF_LOG" 2>&1 < /dev/null &
+    nohup "$CF_BIN" tunnel --config "$CF_CONFIG" run "$TUNNEL_NAME" >> "$CF_LOG" 2>&1 < /dev/null 9>&- &
     echo $! > "$CF_PID"
     sleep 2
     if ! pid_running "$CF_PID"; then
@@ -1231,6 +1248,8 @@ status_line() {
     fi
     if [ "$st" = "active" ] || [ "$st" = "running" ]; then
         say "${C_GREEN}● $name：运行中${C_RESET}  (PID ${pid:-—})"
+    elif [ "$st" = "crashed" ]; then
+        say "${C_YELLOW}▸ $name：已崩溃（crashed，异常退出）${C_RESET}"
     else
         say "${C_RED}○ $name：未运行${C_RESET}"
     fi
@@ -1737,18 +1756,20 @@ sq_start() {
     if has_systemd && [ -f "$SQ_UNIT" ]; then
         systemctl restart suoha-shadowquic
     else
-        # 守护脚本缺失（手动删除/旧安装未接管）时先重建，避免静默启动失败
-        if [ ! -x /usr/local/bin/suoha-quic-daemon.sh ] && [ -d "$SQ_APP_DIR" ]; then
-            sq_write_service
+        if [ ! -f "$SQ_INIT" ]; then
+            # 没有本项目的服务单元。若 /etc/init.d/shadowquic 属于其他项目，绝不接管。
+            if [ -f /etc/init.d/shadowquic ] && ! sq_owned; then
+                warn "检测到其他项目的 shadowquic 服务，Suoha Plus 不自动启动它。"
+                return 0
+            fi
             rc-update del shadowquic default >/dev/null 2>&1 || true
+            rm -f /etc/init.d/shadowquic 2>/dev/null || true
         fi
         if [ -x "$SQ_INIT" ]; then
             rc-service suoha-shadowquic start >/dev/null 2>&1 || /etc/init.d/suoha-shadowquic start
-        elif [ -f /etc/init.d/shadowquic ]; then
-            /etc/init.d/shadowquic start
         else
-            nohup /usr/local/bin/suoha-quic-daemon.sh < /dev/null > /dev/null 2>&1 &
-            echo $! > /run/suoha-shadowquic.pid
+            warn '未找到 Suoha Plus 的 ShadowQuic 服务单元，请重新安装。'
+            return 1
         fi
     fi
     sleep 2
@@ -2000,9 +2021,25 @@ EOF
 esac
 
 load_state
+
+# 并发互斥锁。
+# 关键：后台服务（nohup 启动的 xray/cloudflared）会继承本进程已打开的 fd，
+# 所以所有 nohup 启动处都必须带 9>&-，否则脚本退出后锁被常驻服务持有，
+# 用户将再也无法打开本脚本。
 if command_exists flock; then
     if exec 9>"$LOCK_FILE" 2>/dev/null; then
         flock -n 9 2>/dev/null || { err '另一个 Suoha Plus 实例正在运行，请稍后重试。'; exit 1; }
     fi
 fi
+
+# 安装中断 / Ctrl+C / 正常退出都清理临时目录
+if command_exists trap; then
+    trap 'cleanup_on_exit' INT TERM HUP EXIT
+fi
+
 main_menu
+
+cleanup_on_exit
+if [ -e /proc/$$/fd/9 ]; then
+    exec 9>&-
+fi

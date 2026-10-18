@@ -38,6 +38,7 @@ run_suite() {
 run_suite "静态断言" test_static.sh
 run_suite "行为测试" test_behavior.sh
 run_suite "卸载沙箱" test_uninstall.sh
+run_suite "真实行为回归" test_regression.sh
 
 echo ""
 echo "========================================"
