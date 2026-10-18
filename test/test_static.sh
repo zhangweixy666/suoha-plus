@@ -30,9 +30,9 @@ echo "待测：$S"
 echo "[版本]"
 VER=$(sed -n 's/^APP_VERSION="\(.*\)"/\1/p' "$S" | head -n 1)
 check "APP_VERSION 存在" test -n "$VER"
-check "APP_VERSION 为 2.4.4" test "$VER" = "2.4.4"
-check "README 版本记录含 v2.4.4" grep -qF '**v2.4.4**' "$REPO/README.md"
-VERREADME=$(grep -oE 'v2\.4\.4' "$REPO/README.md" | head -n 1)
+check "APP_VERSION 为 2.4.5" test "$VER" = "2.4.5"
+check "README 版本记录含 v2.4.5" grep -qF '**v2.4.5**' "$REPO/README.md"
+VERREADME=$(grep -oE 'v2\.4\.5' "$REPO/README.md" | head -n 1)
 check "README 与脚本版本一致" test "$VERREADME" = "v$VER"
 
 # ---------- 语法 ----------

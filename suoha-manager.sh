@@ -38,7 +38,7 @@ if [ -z "${SUOHA_TTY:-}" ] && [ ! -t 0 ] && [ "$#" -eq 0 ]; then
 fi
 
 APP_NAME="suoha-plus"
-APP_VERSION="2.4.4"
+APP_VERSION="2.4.5"
 APP_DIR="/opt/suoha-plus"
 BIN_DIR="$APP_DIR/bin"
 LOG_DIR="$APP_DIR/logs"
@@ -851,6 +851,10 @@ stop_services() {
     fi
     stop_pid "$CF_PID"
     stop_pid "$XRAY_PID"
+    # pidfile 可能因重复安装被覆盖，导致旧的后台进程失去追踪。
+    # 按本项目的二进制绝对路径兜底清理，只杀 $APP_DIR/bin 下的进程，不误伤别人。
+    pkill -f "$BIN_DIR/cloudflared" 2>/dev/null || true
+    pkill -f "$BIN_DIR/xray" 2>/dev/null || true
     ok "增强版服务已停止。"
 }
 
@@ -1494,6 +1498,10 @@ uninstall_plus() {
         systemctl disable suoha-shadowquic >/dev/null 2>&1 || true
         rm -f "$SQ_UNIT"; systemctl daemon-reload >/dev/null 2>&1 || true
     fi
+    # 删除目录前再兜底杀一次，避免 pidfile 丢失导致 cloudflared/xray 残留
+    pkill -f "$BIN_DIR/cloudflared" 2>/dev/null || true
+    pkill -f "$BIN_DIR/xray" 2>/dev/null || true
+    sleep 1
     rm -f "$CMD_LINK"
     rm -rf "$APP_DIR"
     ok 'Suoha Plus 已卸载（含 ShadowQuic 服务）；原脚本和原安装目录未改动。'

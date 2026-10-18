@@ -244,6 +244,8 @@ Xray：菜单 5→4 编辑保存即自动校验重启；ShadowQuic：菜单 5→
 ShadowQuic 在菜单 `8 → 7` 单独卸载。
 
 ## 📜 版本
+- **v2.4.5**：修复后台进程失去追踪后无法停止的问题——Quick 模式重复安装会覆盖 pidfile，旧 `cloudflared` 进程仍在跑却不在任何记录里，导致「停止服务」和「卸载」都杀不掉它（实测残留 4 个进程）。现在 `stop_services` 与卸载流程会按本项目二进制路径（`$APP_DIR/bin/*`）兜底清理，只杀自己的进程。
+
 - **v2.4.4**：修复「删除全部」不清理 ShadowQuic 服务的问题——之前菜单 7→3 选「删除全部 Suoha Plus」后，`suoha-shadowquic` 的 init 脚本、开机自启注册和进程都会残留（只有菜单 8→7 才清），现已在完全卸载时一并清理服务单元与 daemon wrapper，同时仍按归属标记保护 `/etc/shadowquic` 里其他项目的配置。
 
 - **v2.4.3**：修复交互提示丢失导致「看起来卡死」的严重体验问题：`ask_default` 与全部 14 处 `read -r -p` 的提示符写在 `$(...)` 子 shell 里会被吞掉，用户只看到空白光标，实际是在等输入；现改为 `safe_read`，提示显式写 stderr，**且 stdin 关闭/管道结束时自动采用默认值继续，绝不挂死**。下载 Xray/cloudflared/shadowquic 时新增「最长等 N 秒」与「实际耗时 M 秒」反馈，网络慢时不再像死机。
