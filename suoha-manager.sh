@@ -38,7 +38,7 @@ if [ -z "${SUOHA_TTY:-}" ] && [ ! -t 0 ] && [ "$#" -eq 0 ]; then
 fi
 
 APP_NAME="suoha-plus"
-APP_VERSION="2.4.3"
+APP_VERSION="2.4.4"
 APP_DIR="/opt/suoha-plus"
 BIN_DIR="$APP_DIR/bin"
 LOG_DIR="$APP_DIR/logs"
@@ -1485,9 +1485,18 @@ uninstall_plus() {
     [ "$answer" = "UNINSTALL" ] || { info '已取消。'; return 0; }
     stop_services 2>/dev/null || true
     remove_systemd_units
+    # 一并清理 ShadowQuic 服务单元：只删本项目的 init/unit 与 daemon wrapper，
+    # 不碰 /etc/shadowquic 里其他项目的配置（归属由 sq_remove 内部判断）。
+    rc-service suoha-shadowquic stop >/dev/null 2>&1 || true
+    rc-update del suoha-shadowquic default >/dev/null 2>&1 || true
+    rm -f "$SQ_INIT" /usr/local/bin/suoha-quic-daemon.sh 2>/dev/null || true
+    if has_systemd; then
+        systemctl disable suoha-shadowquic >/dev/null 2>&1 || true
+        rm -f "$SQ_UNIT"; systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
     rm -f "$CMD_LINK"
     rm -rf "$APP_DIR"
-    ok 'Suoha Plus 已卸载；原脚本和原安装目录未改动。'
+    ok 'Suoha Plus 已卸载（含 ShadowQuic 服务）；原脚本和原安装目录未改动。'
     exit 0
 }
 
