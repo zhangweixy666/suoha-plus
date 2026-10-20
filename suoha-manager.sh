@@ -17,11 +17,15 @@ if [ -z "${SUOHA_TTY:-}" ] && [ ! -t 0 ] && [ "$#" -eq 0 ]; then
     esac
     _install_path="${SUOHA_INSTALL_PATH:-$HOME/suoha-plus-managed.sh}"
     mkdir -p "$(dirname "$_install_path")" 2>/dev/null
+    # 引导阶段函数还没定义，这里用自包含的提示 + 进度条（不要再静默下载）。
+    printf '[信息] 正在获取脚本副本：%s\n' "$_self_url" >&2
+    printf '[信息] 保存到：%s\n' "$_install_path" >&2
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL -o "$_install_path" "$_self_url" 2>/dev/null || \
-        wget -qO "$_install_path" "$_self_url" 2>/dev/null
+        curl -fL --connect-timeout 15 --max-time 120 --progress-bar \
+             -o "$_install_path" "$_self_url" || \
+        wget -O "$_install_path" "$_self_url"      # wget 自带进度条，不要 2>/dev/null
     else
-        wget -qO "$_install_path" "$_self_url" 2>/dev/null
+        wget -O "$_install_path" "$_self_url"      # 同上：保留 wget 原生进度显示
     fi
     if [ -s "$_install_path" ]; then
         chmod +x "$_install_path" 2>/dev/null
@@ -38,7 +42,7 @@ if [ -z "${SUOHA_TTY:-}" ] && [ ! -t 0 ] && [ "$#" -eq 0 ]; then
 fi
 
 APP_NAME="suoha-plus"
-APP_VERSION="2.5.0"
+APP_VERSION="2.6.1"
 APP_DIR="/opt/suoha-plus"
 BIN_DIR="$APP_DIR/bin"
 LOG_DIR="$APP_DIR/logs"
@@ -58,11 +62,21 @@ LOCK_FILE="/tmp/suoha-plus.lock"
 SERVICE_XRAY="suoha-plus-xray.service"
 SERVICE_CF="suoha-plus-cloudflared.service"
 
-XRAY_VERSION="v26.3.27"
-CLOUDFLARED_VERSION="2026.8.2"
+XRAY_VERSION="${SUOHA_XRAY_VERSION:-v26.3.27}"
+CLOUDFLARED_VERSION="${SUOHA_CLOUDFLARED_VERSION:-2026.8.2}"
 SQ_PORT="1443"
+# 固定版本是刻意设计（可复现、不受上游更新影响）。
+# 但提供两条升级通道：
+#   1) 环境变量覆盖：SUOHA_XRAY_VERSION=vXX.X.XX ./suoha-manager.sh
+#   2) 菜单 9) 组件版本：检查上游最新版，确认后升级并写入 state.env
 XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download/$XRAY_VERSION"
 CF_RELEASE_BASE="https://github.com/cloudflare/cloudflared/releases/download/$CLOUDFLARED_VERSION"
+
+# 版本变化后必须重算下载基址，否则还在用旧 tag 拼 URL。
+refresh_release_bases() {
+    XRAY_RELEASE_BASE="https://github.com/XTLS/Xray-core/releases/download/$XRAY_VERSION"
+    CF_RELEASE_BASE="https://github.com/cloudflare/cloudflared/releases/download/$CLOUDFLARED_VERSION"
+}
 
 # 仅作显示和生成节点使用；不会自动更新到 latest。
 # WS 节点默认接入域名：大厂自有域名且解析到 Cloudflare 边缘（对中国友好，非微软系）
@@ -240,6 +254,9 @@ load_state() {
         # shellcheck disable=SC1090
         . "$STATE_FILE"
     fi
+    # state.env 里可能记录了升级后的组件版本（SUOHA_XRAY_VERSION 等），
+    # 下载基址必须跟着重算，否则仍会用旧的 tag 拼 URL 导致 404。
+    refresh_release_bases
     init_defaults
 }
 
@@ -268,6 +285,9 @@ save_state() {
         printf 'REALITY_PRIVATE=%q\n' "$REALITY_PRIVATE"
         printf 'REALITY_PUBLIC=%q\n' "$REALITY_PUBLIC"
         printf 'REALITY_SHORT_ID=%q\n' "$REALITY_SHORT_ID"
+        # 组件版本持久化：菜单 9 升级后必须记住，否则重开菜单又回到脚本内置版本。
+        printf 'SUOHA_XRAY_VERSION=%q\n' "$XRAY_VERSION"
+        printf 'SUOHA_CLOUDFLARED_VERSION=%q\n' "$CLOUDFLARED_VERSION"
     } > "$STATE_FILE"
     chmod 600 "$STATE_FILE"
 }
@@ -289,9 +309,13 @@ validate_common() {
         return 1
     fi
 
-    case "$NODE_ADDRESS" in
-        ""|*[!A-Za-z0-9._:\[\]-]*) err "节点地址只能包含域名、IPv4、IPv6（[方括号]）和端口所需字符。"; return 1 ;;
-    esac
+    # 节点地址允许为空：空表示"自动双栈"（由 generate_nodes 探测公网 v4/v6 各出一条链接）。
+    # 旧实现把 "" 和非法字符写在同一分支里一起 return 1，导致"留空自动"这条路径根本走不通。
+    if [ -n "$NODE_ADDRESS" ]; then
+        case "$NODE_ADDRESS" in
+            *[!A-Za-z0-9._:\[\]-]*) err "节点地址只能包含域名、IPv4、IPv6（[方括号]）和端口所需字符。"; return 1 ;;
+        esac
+    fi
 }
 
 validate_domain() {
@@ -326,25 +350,38 @@ has_openrc() {
 }
 
 install_dependencies() {
-    local missing=0
-    command_exists curl || missing=1
-    command_exists unzip || missing=1
-    command_exists base64 || missing=1
-    command_exists sha256sum || missing=1
+    local missing=0 pkgs=""
+    command_exists curl || { missing=1; pkgs="$pkgs curl"; }
+    command_exists unzip || { missing=1; pkgs="$pkgs unzip"; }
+    command_exists base64 || { missing=1; pkgs="$pkgs coreutils"; }
+    command_exists sha256sum || { missing=1; pkgs="$pkgs coreutils"; }
     if [ "$missing" = "0" ]; then return 0; fi
 
-    info "正在安装 curl、unzip、base64 等依赖..."
-    if command_exists apt-get; then
-        apt-get update && apt-get install -y curl unzip coreutils ca-certificates || return 1
-    elif command_exists dnf; then
-        dnf install -y curl unzip coreutils ca-certificates || return 1
-    elif command_exists yum; then
-        yum install -y curl unzip coreutils ca-certificates || return 1
-    elif command_exists apk; then
-        apk add --no-cache curl unzip coreutils ca-certificates || return 1
+    local mgr=""
+    if command_exists apt-get; then mgr="apt-get"
+    elif command_exists dnf; then mgr="dnf"
+    elif command_exists yum; then mgr="yum"
+    elif command_exists apk; then mgr="apk"
     else
         err "找不到 apt-get/dnf/yum/apk，请手动安装 curl、unzip、base64。"
         return 1
+    fi
+
+    # 安装系统包会改动机器全局环境（apt 还会先 update），必须让用户明确同意。
+    confirm_download \
+        "系统依赖：$(printf '%s' "$pkgs" | tr -s ' ' | sed 's/^ //')" \
+        "通过 $mgr 安装（会修改系统包状态，apt 会先执行 update）" \
+        "/usr/bin" || return 1
+
+    info "正在安装 curl、unzip、base64 等依赖..."
+    if [ "$mgr" = "apt-get" ]; then
+        apt-get update && apt-get install -y curl unzip coreutils ca-certificates || return 1
+    elif [ "$mgr" = "dnf" ]; then
+        dnf install -y curl unzip coreutils ca-certificates || return 1
+    elif [ "$mgr" = "yum" ]; then
+        yum install -y curl unzip coreutils ca-certificates || return 1
+    else
+        apk add --no-cache curl unzip coreutils ca-certificates || return 1
     fi
 }
 
@@ -371,21 +408,175 @@ cloudflared_version_ok() {
     [ -x "$CF_BIN" ] && "$CF_BIN" version 2>/dev/null | grep -Fq "$CLOUDFLARED_VERSION"
 }
 
+# ---------- 下载交互：先确认，再显示真实进度 ----------
+# 约定：任何网络下载都必须先经过 confirm_download 得到明确同意，
+# 再用 dl_run 执行（展示百分比/大小/速度/剩余时间），不允许裸 curl 静默下载。
+
+human_bytes() {
+    local b="${1:-0}"
+    case "$b" in ''|*[!0-9]*) b=0 ;; esac
+    if [ "$b" -ge 1073741824 ]; then
+        printf '%d.%02dG' $((b / 1073741824)) $(( (b % 1073741824) * 100 / 1073741824 ))
+    elif [ "$b" -ge 1048576 ]; then
+        printf '%d.%01dM' $((b / 1048576)) $(( (b % 1048576) * 10 / 1048576 ))
+    elif [ "$b" -ge 1024 ]; then
+        printf '%dK' $((b / 1024))
+    else
+        printf '%dB' "$b"
+    fi
+}
+
+# 下载前确认。用法：confirm_download "下载内容" "补充说明" "保存位置"
+# 返回 0 = 用户同意；1 = 取消（调用方必须直接返回，不得修改任何东西）。
+# 默认值是 N：直接回车不会开始下载。
+# 自动化场景可用 SUOHA_ASSUME_YES=1 跳过确认。
+confirm_download() {
+    local what="$1" note="$2" dest="$3" ans=""
+    if [ "${SUOHA_ASSUME_YES:-0}" = "1" ]; then
+        info "已设置 SUOHA_ASSUME_YES=1，跳过下载确认。"
+        return 0
+    fi
+    say ""
+    say "${C_CYAN}── 下载确认 ──${C_RESET}"
+    say "  内容：$what"
+    [ -n "$note" ] && say "  说明：$note"
+    [ -n "$dest" ] && say "  位置：$dest"
+    safe_read ans "确认开始下载？[y/N]: " "n"
+    case "$ans" in
+        y|Y|yes|YES|Yes) return 0 ;;
+    esac
+    info "已取消下载，未做任何修改。"
+    return 1
+}
+
+# 取远端文件大小（跟随重定向，取最后一个 Content-Length）。拿不到时返回 0。
+# 必须先确认 HTTP 状态码是 2xx：404/500 的错误页也有 Content-Length，
+# 直接取会让进度条显示一个假的"100% 完成"然后再失败。
+dl_remote_size() {
+    local url="$1" resp cl code
+    resp="$(curl -sIL --max-time 10 -w '\nHTTPCODE:%{http_code}' "$url" 2>/dev/null | tr -d '\r')"
+    code="$(printf '%s\n' "$resp" | sed -n 's/^HTTPCODE:\([0-9][0-9]*\)$/\1/p' | tail -n 1)"
+    case "$code" in
+        2[0-9][0-9]) : ;;
+        *) printf '0'; return 0 ;;
+    esac
+    cl="$(printf '%s\n' "$resp" | awk 'tolower($1) == "content-length:" { v = $2 } END { print v }')"
+    case "$cl" in
+        ''|*[!0-9]*) printf '0' ;;
+        *)           printf '%s' "$cl" ;;
+    esac
+}
+
+# 渲染一行进度：\r 原地刷新，只写 stderr，不污染 stdout（避免破坏 $(...) 取值）。
+dl_render() {
+    local label="$1" got="$2" total="$3" started="$4" tty="$5"
+    local now elapsed pct filled bar i speed sp eta
+    [ "$tty" = "1" ] || return 0
+    now="$(date +%s)"
+    elapsed=$(( now - started ))
+    [ "$elapsed" -lt 1 ] && elapsed=1
+    speed=$(( got / elapsed ))
+    if [ "$total" -gt 0 ]; then
+        pct=$(( got * 100 / total ))
+        [ "$pct" -gt 100 ] && pct=100
+        filled=$(( pct * 20 / 100 ))
+        bar=""
+        i=0
+        while [ "$i" -lt 20 ]; do
+            if [ "$i" -lt "$filled" ]; then bar="$bar#"; else bar="$bar."; fi
+            i=$(( i + 1 ))
+        done
+        sp=$speed
+        [ "$sp" -lt 1 ] && sp=1
+        eta=$(( (total - got) / sp ))
+        [ "$eta" -lt 0 ] && eta=0
+        printf '\r  %-12s [%s] %3d%%  %s/%s  %s/s  剩余%ss\033[K' \
+            "$label" "$bar" "$pct" "$(human_bytes "$got")" "$(human_bytes "$total")" \
+            "$(human_bytes "$speed")" "$eta" >&2
+    else
+        printf '\r  %-12s 已下载 %s  %s/s\033[K' \
+            "$label" "$(human_bytes "$got")" "$(human_bytes "$speed")" >&2
+    fi
+}
+
+# dl_run LABEL URL DEST [MAX_SECONDS]
+# 返回 0 = 成功（文件已完整落盘）；非 0 = 失败（已打印原因，DEST 会被清理）。
+dl_run() {
+    local label="$1" url="$2" dest="$3" max_t="${4:-180}"
+    local total started pid rc tty errf got sz used
+    rm -f "$dest"
+    errf="$dest.curlerr"
+    [ -t 2 ] && tty=1 || tty=0
+    total="$(dl_remote_size "$url")"
+    case "$total" in ''|*[!0-9]*) total=0 ;; esac
+    started="$(date +%s)"
+    # -sS：屏蔽 curl 自带进度条（会与我们的渲染打架），但保留错误文本。
+    # curl 的 stderr 落到临时文件，失败时再展示，避免 --retry 的重试信息冲散进度行。
+    curl -fsSL --retry 3 --connect-timeout 15 --max-time "$max_t" \
+         -o "$dest" "$url" 2>"$errf" &
+    pid=$!
+    if [ "$tty" = "1" ]; then
+        while kill -0 "$pid" 2>/dev/null; do
+            sleep 1
+            got="$(wc -c < "$dest" 2>/dev/null || printf 0)"
+            got="${got//[!0-9]/}"
+            [ -n "$got" ] || got=0
+            dl_render "$label" "$got" "$total" "$started" "$tty"
+        done
+    else
+        # 非交互环境无法原地刷新，退化为一条开始提示，避免长时间静默。
+        info "$label 开始下载（大小 $(human_bytes "$total")，最长等 ${max_t}s）..."
+    fi
+    wait "$pid"
+    rc=$?
+    used=$(( $(date +%s) - started ))
+    [ "$used" -lt 1 ] && used=1
+    if [ "$tty" = "1" ]; then
+        if [ "$rc" -eq 0 ]; then
+            got="$(wc -c < "$dest" 2>/dev/null || printf 0)"
+            got="${got//[!0-9]/}"
+            [ -n "$got" ] || got=0
+            dl_render "$label" "$got" "$got" "$started" "$tty"
+        fi
+        printf '\n' >&2
+    fi
+    if [ "$rc" -ne 0 ]; then
+        err "$label 下载失败（curl 退出码 $rc）。"
+        if [ -s "$errf" ]; then
+            tail -n 5 "$errf" | sed 's/^/    /' >&2
+        fi
+        rm -f "$errf" "$dest"
+        return 1
+    fi
+    rm -f "$errf"
+    sz="$(wc -c < "$dest" 2>/dev/null || printf 0)"
+    sz="${sz//[!0-9]/}"
+    [ -n "$sz" ] || sz=0
+    ok "$label 下载完成：$(human_bytes "$sz")，耗时 ${used}s（均速 $(human_bytes $(( sz / used )))/s）"
+    return 0
+}
+
 download_binaries() {
+    # 第二个参数 1 = 调用方已确认过（菜单 9 升级路径），避免同一件事问两次。
+    # 实测教训：component_upgrade 直接复用本函数时，用户点一次"升级"会被问两遍，
+    # 第二次默认 N 直接静默取消升级。
+    local preconfirmed="${1:-0}"
     set_arch_assets || return 1
     mkdir -p "$BIN_DIR" "$TMP_DIR" || return 1
     local tmp xray_candidate
+    if [ "$preconfirmed" != "1" ]; then
+        confirm_download \
+            "Xray $XRAY_VERSION（$XRAY_ASSET）+ cloudflared $CLOUDFLARED_VERSION（$CF_ASSET）" \
+            "来自 GitHub Releases，合计约 60-80MB；下载后校验 SHA-256 与可执行版本" \
+            "$BIN_DIR" || return 1
+    fi
     tmp="$(mktemp -d "$TMP_DIR/download.XXXXXX")" || return 1
     cleanup_register "$tmp"
-    info "下载固定版 Xray $XRAY_VERSION ($XRAY_ASSET，最长等180秒)..."
-    _s1="$(date +%s)"
-    if ! curl -fL --retry 3 --connect-timeout 15 --max-time 180 -o "$tmp/xray.zip" "${XRAY_RELEASE_BASE}/${XRAY_ASSET}"; then
-        rm -rf "$tmp"; err "Xray 下载失败（网络不通或超时）。"; return 1
-    fi
-    info "Xray 下载完成，耗时 $(( $(date +%s) - _s1 )) 秒。"
-    if ! curl -fsSL --retry 3 --connect-timeout 15 -o "$tmp/xray.dgst" "${XRAY_RELEASE_BASE}/${XRAY_ASSET}.dgst"; then
-        rm -rf "$tmp"; err "Xray 校验文件下载失败，拒绝安装。"; return 1
-    fi
+
+    dl_run "Xray" "${XRAY_RELEASE_BASE}/${XRAY_ASSET}" "$tmp/xray.zip" 180 \
+        || { rm -rf "$tmp"; err "Xray 下载失败（网络不通或超时）。"; return 1; }
+    dl_run "Xray-SHA256" "${XRAY_RELEASE_BASE}/${XRAY_ASSET}.dgst" "$tmp/xray.dgst" 60 \
+        || { rm -rf "$tmp"; err "Xray 校验文件下载失败，拒绝安装。"; return 1; }
     local xray_sha expected_sha
     expected_sha="$(awk -F'= ' '/^SHA2-256=/{print $2; exit}' "$tmp/xray.dgst")"
     xray_sha="$(sha256sum "$tmp/xray.zip" | awk '{print $1}')"
@@ -405,12 +596,8 @@ download_binaries() {
         rm -rf "$tmp"; err "Xray 版本校验失败，拒绝安装。"; return 1
     fi
 
-    info "下载固定版 cloudflared $CLOUDFLARED_VERSION ($CF_ASSET，最长等180秒)..."
-    _s2="$(date +%s)"
-    if ! curl -fL --retry 3 --connect-timeout 15 --max-time 180 -o "$tmp/cloudflared" "${CF_RELEASE_BASE}/${CF_ASSET}"; then
-        rm -rf "$tmp"; err "cloudflared 下载失败（网络不通或超时）。"; return 1
-    fi
-    info "cloudflared 下载完成，耗时 $(( $(date +%s) - _s2 )) 秒。"
+    dl_run "cloudflared" "${CF_RELEASE_BASE}/${CF_ASSET}" "$tmp/cloudflared" 180 \
+        || { rm -rf "$tmp"; err "cloudflared 下载失败（网络不通或超时）。"; return 1; }
     # cloudflared release has no official SHA-256 manifest; verify executable and exact version.
     chmod +x "$tmp/cloudflared"
     if ! "$tmp/cloudflared" version 2>/dev/null | grep -Fq "$CLOUDFLARED_VERSION"; then
@@ -425,6 +612,135 @@ download_binaries() {
     ok "固定版本已安装：Xray $XRAY_VERSION，cloudflared $CLOUDFLARED_VERSION。"
 }
 
+# ---------- 组件版本检查 / 升级（补齐 Xray 与 cloudflared 的升级通道）----------
+# 设计：默认仍跑固定版本（可复现），但让用户能看见"有没有新版"并主动升级，
+# 与 ShadowQuic 已有的 sq_check_update / sq_upgrade 保持一致。
+
+# 查询类提示：只在 tty 下用 \r + 清行原地刷新；
+# 非 tty（重定向到文件/管道）时改成一行普通提示，避免把 ESC 控制字符写进日志。
+net_hint_begin() {
+    if [ -t 2 ]; then printf '  %s...\r' "$1" >&2; else printf '  %s...\n' "$1" >&2; fi
+}
+net_hint_end() {
+    [ -t 2 ] && printf '\033[K' >&2
+    return 0
+}
+
+xray_latest_version() {
+    local v
+    net_hint_begin "正在查询 Xray 上游版本"
+    v="$(curl -fsSL --max-time 10 https://api.github.com/repos/XTLS/Xray-core/releases/latest 2>/dev/null \
+         | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/' | head -n 1)"
+    net_hint_end
+    [ -n "$v" ] || return 1
+    printf '%s' "$v"
+}
+
+cloudflared_latest_version() {
+    local v
+    net_hint_begin "正在查询 cloudflared 上游版本"
+    v="$(curl -fsSL --max-time 10 https://api.github.com/repos/cloudflare/cloudflared/releases/latest 2>/dev/null \
+         | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/' | head -n 1)"
+    net_hint_end
+    [ -n "$v" ] || return 1
+    # cloudflared 的 tag 形如 2026.8.2，去掉可能的 v 前缀统一比较
+    printf '%s' "${v#v}"
+}
+
+# 打印当前版本与上游最新版。返回 0 = 都是最新，2 = 有新版，1 = 检查失败。
+version_check() {
+    local xl cl xc cc rc=0
+    info '检查组件最新版本（需要访问 api.github.com）...'
+    xc="$(xray_version_ok && "$XRAY_BIN" version 2>/dev/null | head -n 1 | awk '{print $2}' || true)"
+    cc="$(cloudflared_version_ok && "$CF_BIN" version 2>/dev/null | head -n 1 | awk '{print $3}' || true)"
+    xl="$(xray_latest_version 2>/dev/null || true)"
+    cl="$(cloudflared_latest_version 2>/dev/null || true)"
+    printf '  Xray         当前 %-12s 脚本固定 %-12s 上游最新 %s\n' \
+        "${xc:-未安装}" "$XRAY_VERSION" "${xl:-获取失败}"
+    printf '  cloudflared  当前 %-12s 脚本固定 %-12s 上游最新 %s\n' \
+        "${cc:-未安装}" "$CLOUDFLARED_VERSION" "${cl:-获取失败}"
+    if [ -z "$xl" ] && [ -z "$cl" ]; then
+        warn '无法获取上游版本（网络问题或 GitHub API 限流）。'
+        return 1
+    fi
+    if [ -n "$xl" ] && [ "v${xc#v}" != "${xl#v}" ]; then rc=2; fi
+    if [ -n "$cl" ] && [ "${cc#v}" != "${cl#v}" ]; then rc=2; fi
+    if [ "$rc" = "0" ]; then ok '组件均为最新版本。'; fi
+    return "$rc"
+}
+
+# 升级到指定版本：改全局变量 → 重算下载地址 → 复用 download_binaries → 写回 state → 重启
+component_upgrade() {
+    local which="$1" newver="$2" old x_old c_old
+    need_root || return 1
+    case "$which" in
+        xray)        old="$XRAY_VERSION";        XRAY_VERSION="$newver" ;;
+        cloudflared) old="$CLOUDFLARED_VERSION"; CLOUDFLARED_VERSION="$newver" ;;
+        *) err "未知组件：$which"; return 1 ;;
+    esac
+    refresh_release_bases
+    save_state
+    # 只装指定组件：download_binaries 会同时校验两者，这里用它保证原子性与校验逻辑复用。
+    # 传 1 表示"已确认过"——确认动作在 component_menu 里已经做过一次了。
+    if ! download_binaries 1; then
+        err "升级失败，已回滚版本号配置。"
+        case "$which" in
+            xray)        XRAY_VERSION="$old" ;;
+            cloudflared) CLOUDFLARED_VERSION="$old" ;;
+        esac
+        refresh_release_bases
+        save_state
+        return 1
+    fi
+    # 二进制换了，必须重启才生效
+    if [ -f "$STATE_FILE" ] && [ -f "$XRAY_CONFIG" ]; then
+        restart_services || warn '组件已更新，但服务重启失败，请到菜单 4 手动重启。'
+    fi
+    ok "$which 已升级：$old → $newver"
+    say "  版本已写入 $STATE_FILE，后续运行沿用该版本。"
+    say "  如需回到脚本内置默认值：删除 state.env 里的 SUOHA_*_VERSION 行，或重新安装。"
+}
+
+component_menu() {
+    while true; do
+        banner
+        say "${C_CYAN}组件版本${C_RESET}"
+        printf '  Xray         : %s（脚本内置 %s）\n' \
+            "$("$XRAY_BIN" version 2>/dev/null | head -n1 | awk '{print $2}' || echo 未安装)" "$XRAY_VERSION"
+        printf '  cloudflared  : %s（脚本内置 %s）\n' \
+            "$("$CF_BIN" version 2>/dev/null | head -n1 | awk '{print $3}' || echo 未安装)" "$CLOUDFLARED_VERSION"
+        printf '  shadowquic   : %s\n' "$(sq_local_version 2>/dev/null || echo 未安装)"
+        say ""
+        say '1) 检查上游最新版本'
+        say '2) 升级 Xray 到上游最新版'
+        say '3) 升级 cloudflared 到上游最新版'
+        say '0) 返回主菜单'
+        safe_read m '请选择 [0]: ' '0'
+        local xl cl
+        case "${m:-0}" in
+            1) version_check; pause_screen ;;
+            2)
+                xl="$(xray_latest_version)" || { err '无法获取 Xray 最新版本。'; pause_screen; continue; }
+                # 说明里必须点明"会顺带同步 cloudflared"，否则用户不知道实际会下载两个包。
+                confirm_download "Xray $xl（当前 $XRAY_VERSION）" \
+                    "会重新校验并替换 $XRAY_BIN；同时按当前版本同步 cloudflared $CLOUDFLARED_VERSION" \
+                    "$XRAY_BIN" \
+                    && component_upgrade xray "$xl"
+                pause_screen
+                ;;
+            3)
+                cl="$(cloudflared_latest_version)" || { err '无法获取 cloudflared 最新版本。'; pause_screen; continue; }
+                confirm_download "cloudflared $cl（当前 $CLOUDFLARED_VERSION）" \
+                    "会重新校验并替换 $CF_BIN；同时按当前版本同步 Xray $XRAY_VERSION" \
+                    "$CF_BIN" \
+                    && component_upgrade cloudflared "$cl"
+                pause_screen
+                ;;
+            0|'') return 0 ;;
+            *) warn '无效选项。'; sleep 1 ;;
+        esac
+    done
+}
 ensure_software() {
     install_dependencies || return 1
     if ! xray_version_ok || ! cloudflared_version_ok; then
@@ -459,13 +775,41 @@ validate_reality() {
         err "Reality 端口必须是 1024-65535。"; return 1
     fi
     [ -n "$REALITY_DEST" ] || { err "Reality dest 不能为空。"; return 1; }
+    # dest 会被原样插进 xray.json 的 JSON 字符串里，必须先做字符白名单，
+    # 否则 " 或 } 能逃出 JSON 结构（对比：域名/隧道名/WS 路径本来就有白名单）。
+    # 注意：bash 的 [[ =~ ]] 里不能写 \[\-]，实测会变成"任何值都不匹配"。
+    # 方括号字符类必须把 ] 放最前、- 放最后（经 re_probe2.sh 验证：合法值 5/5 通过，非法值 6/6 拒绝）。
+    if ! [[ "$REALITY_DEST" =~ ^[]A-Za-z0-9._:[-]+$ ]]; then
+        err "Reality dest 只能包含域名、IPv4/IPv6 和端口字符（不能带引号、空格、斜杠）。"
+        return 1
+    fi
     case "$REALITY_DEST" in
         *:*) : ;;
         *) REALITY_DEST="$REALITY_DEST:443" ;;
     esac
+    # 补完端口后检查端口段合法（域名:abc 这类要拦住）
+    case "$REALITY_DEST" in
+        *:*) 
+            local _dport="${REALITY_DEST##*:}"
+            if ! [[ "$_dport" =~ ^[0-9]+$ ]] || [ "$_dport" -lt 1 ] || [ "$_dport" -gt 65535 ]; then
+                err "Reality dest 端口不合法：$_dport（应为 1-65535）。"
+                return 1
+            fi
+            ;;
+    esac
     [ -n "$REALITY_SNI" ] || { err "Reality SNI 不能为空。"; return 1; }
+    # SNI 同样进入 serverNames 数组，走同一套白名单（不允许 : 和 [ ]）。
+    if ! [[ "$REALITY_SNI" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        err "Reality SNI 只能包含字母、数字、点、下划线、连字符（不能带端口/方括号/引号）。"
+        return 1
+    fi
     [ -n "$REALITY_PRIVATE" ] || { err "缺少 Reality 私钥，请重新安装 Reality 节点。"; return 1; }
     [ -n "$REALITY_PUBLIC" ] || { err "缺少 Reality 公钥，请重新安装 Reality 节点。"; return 1; }
+    # 私钥/公钥是 base64url，同样塞进 JSON，做白名单避免同级别注入。
+    if ! [[ "$REALITY_PRIVATE" =~ ^[A-Za-z0-9_+/=-]+$ ]] || ! [[ "$REALITY_PUBLIC" =~ ^[A-Za-z0-9_+/=-]+$ ]]; then
+        err "Reality 密钥包含非法字符。"
+        return 1
+    fi
     if ! [[ "$REALITY_SHORT_ID" =~ ^[0-9a-f]*$ ]] || [ $(( ${#REALITY_SHORT_ID} % 2 )) -ne 0 ] || [ "${#REALITY_SHORT_ID}" -gt 16 ]; then
         err "Reality shortId 必须是 0-f 的偶数长度十六进制（最长16位）。"; return 1
     fi
@@ -644,26 +988,52 @@ current_tunnel_host() {
 
 generate_nodes() {
     mkdir -p "$APP_DIR" || return 1
-    local host label tmp json path_q ip4 ip6
+    local host label tmp json path_q ip4 ip6 raddr ra4 ra6
     host="$(current_tunnel_host)"
     label="$(url_label "$ISP_TAG")"
     ip4="$(public_ip 2>/dev/null || true)"
     ip6="$(public_ip6 2>/dev/null || true)"
     ip6="${ip6#[}"
+    # Reality 连接地址解析：setup_reality 里让用户填的 NODE_ADDRESS 必须真正生效，
+    # 否则用户指定域名/指定 IP 会被静默忽略（v2.5.0 的缺陷）。
+    # 带 [ ] 的是 IPv6，裸域名/IPv4 直接可用；只产出用户指定的那一条，
+    # 未指定（空）时才回退到自动探测的 v4/v6 双栈链接。
+    raddr="${NODE_ADDRESS:-}"
+    ra4=""; ra6=""
+    case "$raddr" in
+        \[*\])
+            ra6="${raddr#\[}"; ra6="${ra6%\]}"
+            ;;
+        *:*)
+            # 裸 IPv6（用户没写方括号）也需要加方括号才能拼进 URL
+            ra6="$raddr"
+            ;;
+        "")
+            ra4="$ip4"; ra6="$ip6"
+            ;;
+        *)
+            ra4="$raddr"
+            ;;
+    esac
     tmp="$(mktemp "$APP_DIR/v2ray.txt.XXXXXX")" || return 1
     {
         printf '# Suoha Plus 节点信息（自动生成，请勿手动编辑）\n'
         printf '# Xray %s | cloudflared %s\n' "$XRAY_VERSION" "$CLOUDFLARED_VERSION"
         if [ "$REALITY_ENABLED" = "yes" ]; then
             printf '# Reality 直连节点 | 端口：%s | SNI：%s | 同时监听 IPv4 + IPv6\n\n' "$REALITY_PORT" "$REALITY_SNI"
-            if [ -n "$ip4" ]; then
-                printf 'vless://%s@%s:%s?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s_reality_v4\n' "$UUID" "$ip4" "$REALITY_PORT" "$REALITY_SNI" "$REALITY_PUBLIC" "$REALITY_SHORT_ID" "$label"
+            if [ -n "$ra4" ]; then
+                printf 'vless://%s@%s:%s?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s_reality_v4\n' "$UUID" "$ra4" "$REALITY_PORT" "$REALITY_SNI" "$REALITY_PUBLIC" "$REALITY_SHORT_ID" "$label"
             fi
-            if [ -n "$ip6" ]; then
-                printf 'vless://%s@[%s]:%s?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s_reality_v6\n' "$UUID" "$ip6" "$REALITY_PORT" "$REALITY_SNI" "$REALITY_PUBLIC" "$REALITY_SHORT_ID" "$label"
+            if [ -n "$ra6" ]; then
+                printf 'vless://%s@[%s]:%s?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s_reality_v6\n' "$UUID" "$ra6" "$REALITY_PORT" "$REALITY_SNI" "$REALITY_PUBLIC" "$REALITY_SHORT_ID" "$label"
             fi
             printf '\n# 提示：Reality 为 VPS 直连，无需域名/隧道/优选；fp 也可试 ios、safari\n'
-            printf '# IPv4/IPv6 两条链接二选一：有 v6 用 v6（NAT 机器端口全开），只有 v4 用 v4\n'
+            if [ -n "$raddr" ]; then
+                printf '# 连接地址：%s（安装 Reality 时指定）\n' "$raddr"
+            else
+                printf '# IPv4/IPv6 两条链接二选一：有 v6 用 v6（NAT 机器端口全开），只有 v4 用 v4\n'
+                printf '# 如需固定为某个域名/IP，重新安装 Reality 时在「节点连接地址」处填写\n'
+            fi
             if [ -n "$host" ]; then
                 path_q="$(printf '%s' "$WS_PATH" | sed 's/%/%25/g; s#/#%2F#g')"
                 printf '\n# —— WS+隧道节点（与 Reality 共存，域名固定）——\n\n'
@@ -671,7 +1041,7 @@ generate_nodes() {
                 printf '\n# TLS 端口可尝试：443、2053、2083、2087、2096、8443\n'
                 printf 'vless://%s@%s:80?encryption=none&security=none&type=ws&host=%s&path=%s#%s\n' "$UUID" "$NODE_ADDRESS" "$host" "$path_q" "$label"
                 printf '# 明文端口可尝试：80、8080、8880、2052、2082、2086、2095\n'
-                printf '# 注意：WS 节点连接地址建议优选（当前沿用 Reality 的地址设置）\n'
+                printf '# 注意：WS 节点的 443 走隧道域名；80 走 NODE_ADDRESS 优选地址\n'
             fi
         elif [ -z "$host" ]; then
             printf '# 隧道尚未启动，启动成功后再次运行本脚本即可生成节点。\n'
@@ -1197,6 +1567,9 @@ setup_reality() {
     remove_systemd_units
     MODE="reality"
     REALITY_ENABLED="yes"
+    # Reality 只跑 vless+Vision，PROTOCOL 字段在此模式下无意义；
+    # 之前会保留默认的 vmess，导致 show_config / state.env 显示"Xray 协议: vmess"误导用户。
+    # 保留原值只用于其他模式切回来，但显示与状态统一按 reality 处理。
     ensure_software || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; return 1; }
     say ""
     info "正在生成 Reality 密钥（x25519）..."
@@ -1206,7 +1579,16 @@ setup_reality() {
     REALITY_PORT="$(ask_default 'Reality 监听端口（公网直连）' "$REALITY_PORT")"
     REALITY_DEST="$(ask_default '目标网站 dest（域名或 域名:端口，需支持 TLS1.3+h2）' "$REALITY_DEST")"
     REALITY_SNI="$(ask_default 'SNI（一般与 dest 域名一致）' "$REALITY_SNI")"
-    NODE_ADDRESS="$(ask_default '节点连接地址（默认IPv6，可改IPv4/域名）' "$(reality_default_address 2>/dev/null || echo '')")"
+    # 连接地址：留空 = 自动输出 v4/v6 双栈链接（推荐，由客户端二选一）。
+    # 填了就用填的（域名 / IPv4 / [IPv6]），不再生成另一条 —— 这样"指定地址"才真正生效。
+    local addr_hint
+    addr_hint="$(reality_default_address 2>/dev/null || echo '未探测到')"
+    printf '%s\n' "  当前探测到的公网地址：$addr_hint" >&2
+    safe_read _addr '节点连接地址（留空=自动双栈 / 可填域名或IPv4或[IPv6]）[自动]: ' ''
+    case "$_addr" in
+        [Aa][Uu][Tt][Oo]|自动) NODE_ADDRESS="" ;;
+        *) NODE_ADDRESS="$_addr" ;;
+    esac
     UUID="$(ask_default 'UUID' "$UUID")"
     validate_reality || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; return 1; }
     validate_common || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; return 1; }
@@ -1321,12 +1703,23 @@ setup_persistent() {
 show_config() {
     say "${C_CYAN}当前运行配置${C_RESET}"
     printf '模式          : %s\n' "$MODE"
-    printf 'Xray 协议     : %s\n' "$PROTOCOL"
+    if [ "$REALITY_ENABLED" = "yes" ]; then
+        # Reality 固定走 vless+XTLS Vision，不该显示 PROTOCOL（那字段是 WS 模式用的，
+        # 且默认值是 vmess，会让人误以为 Reality 跑的是 vmess）。
+        printf 'Xray 协议     : vless + xtls-rprx-vision（Reality 固定）\n'
+    else
+        printf 'Xray 协议     : %s\n' "$PROTOCOL"
+    fi
     printf 'Xray 版本     : %s（固定）\n' "$XRAY_VERSION"
     if [ "$REALITY_ENABLED" = "yes" ]; then
         printf 'Reality 端口  : %s\n' "$REALITY_PORT"
         printf 'Reality dest  : %s\n' "$REALITY_DEST"
         printf 'Reality SNI   : %s\n' "$REALITY_SNI"
+        if [ -n "$NODE_ADDRESS" ]; then
+            printf '连接地址      : %s（指定）\n' "$NODE_ADDRESS"
+        else
+            printf '连接地址      : 自动（v4/v6 双栈）\n'
+        fi
     else
         printf '本地端口      : %s\n' "$XRAY_PORT"
         printf 'UUID          : %s\n' "$UUID"
@@ -1406,15 +1799,41 @@ health_check() {
         local host
         host="$(current_tunnel_host)"
         if [ -n "$host" ] && command_exists curl; then
-            local probe_ok=0 _try
+            # 用 WS 升级握手探测，而不是普通 GET：
+            # 旧实现 `curl -s -o /dev/null` 没加 -f，任何 HTTP 响应（含 400/404/530）
+            # 退出码都是 0，导致"永远绿灯"。这里要求真的拿到 101 Switching Protocols，
+            # 或者至少是 400/426（说明请求已到达 xray 的 WS inbound 并被识别为需 Upgrade）。
+            local probe_ok=0 probe_rc _try _code _hdrs
             for _try in 1 2 3; do
-                if curl -s -o /dev/null --max-time 6 "https://$host$WS_PATH"; then probe_ok=1; break; fi
+                _hdrs="$(
+                    curl -s -o /dev/null -D - --max-time 8 \
+                        --http1.1 \
+                        -H 'Connection: Upgrade' \
+                        -H 'Upgrade: websocket' \
+                        -H 'Sec-WebSocket-Version: 13' \
+                        -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+                        "https://$host$WS_PATH" 2>/dev/null
+                )"
+                probe_rc=$?
+                _code="$(printf '%s' "$_hdrs" | sed -n 's#^HTTP/[0-9.]* \([0-9][0-9][0-9]\).*#\1#p' | tail -n 1)"
+                if [ "$_code" = "101" ]; then
+                    probe_ok=1; break
+                fi
+                # 400/426：CF 边缘已回源，xray 收到了非完整 WS 请求 → 链路本身是通的。
+                if [ "$_code" = "400" ] || [ "$_code" = "426" ]; then
+                    probe_ok=1; break
+                fi
+                # curl 退出码非 0 且没有任何 HTTP 响应 = 真的连不上
+                if [ "$probe_rc" -ne 0 ] && [ -z "$_code" ]; then
+                    : # 继续重试
+                fi
                 [ "$_try" -lt 3 ] && sleep 3
             done
             if [ "$probe_ok" = "1" ]; then
-                say "${C_GREEN}✓ 隧道健康    ：$host$WS_PATH 链路探测通过${C_RESET}"
+                say "${C_GREEN}✓ 隧道健康    ：$host$WS_PATH WS 握手正常（HTTP $_code）${C_RESET}"
             else
-                say "${C_RED}✗ 隧道异常    ：$host$WS_PATH 探测失败（隧道可能仍在连接中，或查 Tunnel 日志）${C_RESET}"
+                say "${C_RED}✗ 隧道异常    ：$host$WS_PATH 探测失败${_code:+（HTTP $_code）}${C_RESET}"
+                say "${C_YELLOW}               排查：cloudflared 是否连上边缘 / Tunnel 是否指向 127.0.0.1:$XRAY_PORT${C_RESET}"
             fi
         elif [ -n "$host" ]; then
             say "${C_YELLOW}· 隧道状态    ：进程在线，无法探测（缺少 curl）${C_RESET}"
@@ -1429,6 +1848,19 @@ show_status() {
     status_line "Cloudflare Tunnel" "$SERVICE_CF" "$CF_PID"
     health_check
     sq_status_line
+    # Quick 模式的 cloudflared 没有 service 单元（地址每次重启都会变，刻意不自启），
+    # 所以机器重启后 Xray 会自己起来、隧道不会，节点地址永久失效。
+    # 这里在检测到"Xray 在跑但隧道没跑"时直接给出可执行提示，别让用户对着旧链接发呆。
+    if [ "$MODE" = "quick" ] && [ -f "$STATE_FILE" ]; then
+        if ! pid_running "$CF_PID"; then
+            say ""
+            say "${C_YELLOW}⚠ Quick 隧道未运行${C_RESET}"
+            say "  原因：Quick 地址每次启动都会变，所以不注册开机自启。"
+            say "  影响：$NODE_FILE 里记录的 ${QUICK_URL:-旧地址} 已失效。"
+            say "  处理：回主菜单选 1) 重新启动 Quick Tunnel（会生成新地址并刷新节点）。"
+            say "  更稳的做法：选 2) 持久化 Tunnel，域名固定、可开机自启。"
+        fi
+    fi
     printf 'Xray 日志      : %s\n' "$XRAY_LOG"
     printf 'Tunnel 日志    : %s\n' "$CF_LOG"
 }
@@ -1680,23 +2112,27 @@ sq_local_version() {
 
 sq_latest_version() {
     local v
-    v="$(curl -sL --max-time 8 https://api.github.com/repos/spongebob888/shadowquic/releases/latest 2>/dev/null | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
+    # 与 xray_latest_version 保持一致：查询期间给一行提示，别让菜单看起来卡住。
+    net_hint_begin "正在查询 shadowquic 上游版本"
+    v="$(curl -fsSL --max-time 8 https://api.github.com/repos/spongebob888/shadowquic/releases/latest 2>/dev/null | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
+    net_hint_end
     [ -n "$v" ] || return 1
     printf '%s' "$v"
 }
 
 sq_download_bin() {
-    local ver="$1" asset tmp
+    # 第二个参数 1 = 调用方已经确认过（避免同一件事问两遍）。
+    local ver="$1" preconfirmed="${2:-0}" asset tmp
     asset="$(sq_arch_asset)" || { err "当前架构不支持：$(uname -m)"; return 1; }
-    tmp="$(mktemp /tmp/.sq.dl.XXXXXX)" || return 1
-    info "下载 shadowquic $ver ($asset，约13MB，最长等120秒)..."
-    _dl0="$(date +%s)"
-    if ! curl -fsSL --max-time 120 --connect-timeout 15 -o "$tmp" "https://github.com/spongebob888/shadowquic/releases/download/$ver/$asset" 2>/dev/null; then
-        rm -f "$tmp"
-        err '下载失败（网络不通或超时），请检查到 github.com 的连通性。'
-        return 1
+    if [ "$preconfirmed" != "1" ]; then
+        confirm_download \
+            "shadowquic $ver（$asset）" \
+            "来自 spongebob888/shadowquic Releases，约 13MB；安装到 $SQ_BIN" \
+            "$SQ_BIN" || return 1
     fi
-    info "下载完成，耗时 $(( $(date +%s) - _dl0 )) 秒。"
+    tmp="$(mktemp /tmp/.sq.dl.XXXXXX)" || return 1
+    dl_run "shadowquic" "https://github.com/spongebob888/shadowquic/releases/download/$ver/$asset" "$tmp" 120 \
+        || { rm -f "$tmp"; err '下载失败（网络不通或超时），请检查到 github.com 的连通性。'; return 1; }
     if [ "$(head -c 4 "$tmp" 2>/dev/null)" != "$(printf '\x7f\x45\x4c\x46')" ]; then
         rm -f "$tmp"; err '下载内容不是有效的 ELF 可执行文件。'; return 1
     fi
@@ -1732,9 +2168,12 @@ sq_upgrade() {
     if [ "$rc" = "0" ]; then return 0; fi
     [ "$rc" = "2" ] || return 1
     latest="$(sq_latest_version)" || { err '无法获取最新版本。'; return 1; }
-    safe_read yn "确认升级到 $latest？[y/N]: " ''
-    case "$yn" in y|Y) : ;; *) info '已取消。'; return 0 ;; esac
-    sq_download_bin "$latest" || return 1
+    # 确认只在触发升级时问一次，下载函数用 1 跳过重复询问。
+    confirm_download \
+        "shadowquic $latest（升级）" \
+        "约 13MB，来自 spongebob888/shadowquic Releases；替换 $SQ_BIN 后重启服务" \
+        "$SQ_BIN" || return 1
+    sq_download_bin "$latest" 1 || return 1
     sq_start && ok '升级完成，服务已重启。'
 }
 
@@ -1976,10 +2415,15 @@ sq_setup() {
         if [ "v${cur#v}" = "$ver" ]; then
             info '已是最新版本，跳过下载。'
         else
-            safe_read up_yn "是否升级到 $ver？[Y/n]: " 'y'
-            case "${up_yn:-y}" in
-                n|N) info "保留当前版本 ${cur:-unknown}。" ;;
-                *) sq_download_bin "$ver" || return 1 ;;
+            # 确认点只在这里出现一次；之后 sq_download_bin 带 1 表示已确认。
+            say ""
+            say "${C_CYAN}── 下载确认 ──${C_RESET}"
+            say "  内容：shadowquic $ver（${cur:-unknown} → $ver）"
+            say "  说明：约 13MB，替换 $SQ_BIN 后重启服务"
+            safe_read up_yn "是否升级到 $ver？确认后开始下载 [y/N]: " 'n'
+            case "$up_yn" in
+                y|Y|yes|YES) sq_download_bin "$ver" 1 || return 1 ;;
+                *) info "保留当前版本 ${cur:-unknown}，未做任何修改。"; return 0 ;;
             esac
         fi
     else
@@ -2122,6 +2566,7 @@ main_menu() {
         say '6) 查看当前节点信息'
         say '7) 卸载管理（删除 Xray / 隧道 / 全部）'
         say '8) 安装/管理 ShadowQuic（QUIC 代理，UDP，可选模块）'
+        say '9) 组件版本（检查更新 / 升级 Xray、cloudflared）'
         say '0) 退出'
         safe_read m '请选择 [0]: ' '0'
         case "${m:-0}" in
@@ -2133,6 +2578,7 @@ main_menu() {
             6) print_nodes; pause_screen ;;
             7) uninstall_menu ;;
             8) sq_menu ;;
+            9) component_menu ;;
             0) say '退出成功。'; exit 0 ;;
             *) warn '无效选项。'; sleep 1 ;;
         esac
@@ -2146,11 +2592,14 @@ case "${1:-}" in
 用法：sudo bash $0
 
 Suoha Plus 是原 suoha.sh 的独立增强版（v$APP_VERSION）：
-- 固定 Xray $XRAY_VERSION 和 cloudflared $CLOUDFLARED_VERSION，不使用 latest；
+- 固定 Xray $XRAY_VERSION 和 cloudflared $CLOUDFLARED_VERSION（可用 SUOHA_XRAY_VERSION /
+  SUOHA_CLOUDFLARED_VERSION 环境变量覆盖，或用菜单 9 检查更新后升级）；
 - 三种模式：Quick Tunnel / 持久化 Tunnel / Reality 直连节点（vless+XTLS Vision）；
 - Reality 模式：免域名免隧道，自动生成密钥，IPv4/IPv6 双栈节点链接，可与 WS 隧道共存；
+  安装时可指定连接地址（域名/IPv4/[IPv6]），留空则自动输出双栈链接；
 - WS 模式默认优选接入域名 www.visa.com（大厂自有域名，解析到 Cloudflare 边缘）；
 - 修改 Xray / Tunnel 配置后自动校验、重启并重新生成节点；
+- 所有下载（Xray/cloudflared/ShadowQuic/系统依赖）都需确认，并显示实时进度；
 - 使用独立目录 $APP_DIR、独立服务名和命令 $CMD_LINK；
 - 不删除或覆盖原 suoha.sh。
 EOF

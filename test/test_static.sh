@@ -30,9 +30,9 @@ echo "待测：$S"
 echo "[版本]"
 VER=$(sed -n 's/^APP_VERSION="\(.*\)"/\1/p' "$S" | head -n 1)
 check "APP_VERSION 存在" test -n "$VER"
-check "APP_VERSION 为 2.5.0" test "$VER" = "2.5.0"
-check "README 版本记录含 v2.5.0" grep -qF '**v2.5.0**' "$REPO/README.md"
-VERREADME=$(grep -oE 'v2\.5\.0' "$REPO/README.md" | head -n 1)
+check "APP_VERSION 为 2.6.1" test "$VER" = "2.6.1"
+check "README 版本记录含 v2.6.1" grep -qF '**v2.6.1**' "$REPO/README.md"
+VERREADME=$(grep -oE 'v2\.6\.1' "$REPO/README.md" | head -n 1)
 check "README 与脚本版本一致" test "$VERREADME" = "v$VER"
 
 # ---------- 语法 ----------
@@ -83,8 +83,29 @@ check "菜单 8 绑定 sq_upgrade" has '8) sq_upgrade; pause_screen ;;'
 check "安装时检查最新版" has '检查 shadowquic 版本'
 check "已是新版则跳过下载" has '已是最新版本，跳过下载'
 check "存在旧版会询问升级" has '是否升级到'
-check "升级前二次确认" has '确认升级到'
+# v2.6.0：升级确认统一走 confirm_download（下载前确认 + 进度显示）。
+# 旧断言找的是被删掉的 safe_read 文案；改为断言更强的不变量：
+# ① 升级路径必须经过 confirm_download；② 下载函数必须被传入"已确认"标记 1。
+check "升级前经过统一确认" has 'confirm_download \'
+check "升级路径标注已确认避免重复询问" has 'sq_download_bin "$latest" 1'
+check "sq_setup 升级标注已确认" has 'sq_download_bin "$ver" 1'
+check "下载统一走 dl_run（带进度）" has 'dl_run "shadowquic"'
+check "无静默 curl 下载残留" sh -c "! grep -qF 'curl -fsSL --max-time 120' \"\$0\"" "$S"
 check "用 mktemp 而非固定 /tmp/.sq.dl" sh -c "! grep -qF 'o /tmp/.sq.dl ' \"\$0\"" "$S"
+
+# ---------- v2.6.0 真机测试后补充的回归断言 ----------
+echo "[v2.6.0 真机修复]"
+# 真机发现：菜单 9 升级会被问两次（component_menu 一次 + download_binaries 一次），
+# 第二次默认 N 直接静默取消升级。必须保证 download_binaries 支持 preconfirmed 标记。
+check "download_binaries 支持 preconfirmed 参数" has 'local preconfirmed="${1:-0}"'
+check "component_upgrade 传入已确认标记" has 'download_binaries 1'
+check "sq_download_bin 也支持 preconfirmed" has 'preconfirmed='
+# 真机发现：Reality 模式下 show_config 显示 "Xray 协议: vmess" 误导用户
+check "show_config 按 Reality 区分协议显示" sh -c "awk '/^show_config\\(\\)/{f=1} /^status_line\\(\\)/{f=0} f' \"\$0\" | grep -q 'xtls-rprx-vision（Reality 固定）'" "$S"
+check "show_config 显示连接地址来源" sh -c "awk '/^show_config\\(\\)/{f=1} /^status_line\\(\\)/{f=0} f' \"\$0\" | grep -q '自动（v4/v6 双栈）'" "$S"
+# NODE_ADDRESS 空值必须被 validate_common 放行（否则"留空=自动"走不通）
+check "validate_common 允许空 NODE_ADDRESS" sh -c "awk '/^validate_common\\(\\)/{f=1} /^validate_domain/{f=0} f' \"\$0\" | grep -q 'if \\[ -n \"\\\$NODE_ADDRESS\" \\]'" "$S"
+check "generate_nodes 使用 NODE_ADDRESS" has 'raddr="${NODE_ADDRESS:-}"'
 
 # ---------- P1-4 stop_services ----------
 echo "[P1-4 Reality 模式停止]"
