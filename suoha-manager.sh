@@ -42,7 +42,7 @@ if [ -z "${SUOHA_TTY:-}" ] && [ ! -t 0 ] && [ "$#" -eq 0 ]; then
 fi
 
 APP_NAME="suoha-plus"
-APP_VERSION="2.6.1"
+APP_VERSION="2.6.2"
 APP_DIR="/opt/suoha-plus"
 BIN_DIR="$APP_DIR/bin"
 LOG_DIR="$APP_DIR/logs"
@@ -126,7 +126,7 @@ lock_release() {
 lock_acquire() {
     command_exists flock || return 0
     [ -n "$LOCK_FILE" ] || return 0
-    exec 9>"$LOCK_FILE" 2>/dev/null || return 0
+    { exec 9>"$LOCK_FILE"; } 2>/dev/null || return 0
     flock -n 9 2>/dev/null || return 0
     return 0
 }
@@ -1559,22 +1559,99 @@ apply_config_now() {
     print_nodes
 }
 
+# ---------- 安装事务：失败时还原旧配置并重新拉起旧服务 ----------
+# 实测事故：旧实现在 setup_* 一进来就 stop_services + remove_systemd_units，
+# 之后才做参数校验。用户重装时填错一个字段就直接 return，此时服务单元已被删除、
+# 进程已停止，脚本却回主菜单返回 0 —— 原本正常的节点当场断掉且不会自己回来。
+# 现在改为：先做所有可能失败的步骤（下载/密钥/参数校验/写配置），最后才动服务；
+# 动服务前快照配置与状态，任何一步失败都回滚并把原服务重新拉起来。
+_TXN_ACTIVE=0
+_TXN_DIR=""
+_TXN_HAD_SERVICE="no"
+
+txn_begin() {
+    _TXN_ACTIVE=0
+    mkdir -p "$TMP_DIR" 2>/dev/null || true
+    _TXN_DIR="$(mktemp -d "${TMP_DIR:-/tmp}/txn.XXXXXX" 2>/dev/null)" || return 1
+    local f
+    for f in "$XRAY_CONFIG" "$CF_CONFIG" "$STATE_FILE"; do
+        [ -f "$f" ] && cp -f "$f" "$_TXN_DIR/$(basename "$f")" 2>/dev/null
+    done
+    {
+        printf 'MODE=%q\n' "$MODE"
+        printf 'PROTOCOL=%q\n' "$PROTOCOL"
+        printf 'EDGE_IP=%q\n' "$EDGE_IP"
+        printf 'CF_PROTOCOL=%q\n' "$CF_PROTOCOL"
+        printf 'NODE_ADDRESS=%q\n' "$NODE_ADDRESS"
+        printf 'UUID=%q\n' "$UUID"
+        printf 'WS_PATH=%q\n' "$WS_PATH"
+        printf 'XRAY_PORT=%q\n' "$XRAY_PORT"
+        printf 'QUICK_URL=%q\n' "$QUICK_URL"
+        printf 'DOMAIN=%q\n' "$DOMAIN"
+        printf 'TUNNEL_NAME=%q\n' "$TUNNEL_NAME"
+        printf 'TUNNEL_ID=%q\n' "$TUNNEL_ID"
+        printf 'REALITY_ENABLED=%q\n' "$REALITY_ENABLED"
+        printf 'REALITY_PORT=%q\n' "$REALITY_PORT"
+        printf 'REALITY_DEST=%q\n' "$REALITY_DEST"
+        printf 'REALITY_SNI=%q\n' "$REALITY_SNI"
+        printf 'REALITY_PRIVATE=%q\n' "$REALITY_PRIVATE"
+        printf 'REALITY_PUBLIC=%q\n' "$REALITY_PUBLIC"
+        printf 'REALITY_SHORT_ID=%q\n' "$REALITY_SHORT_ID"
+    } > "$_TXN_DIR/vars.env"
+    _TXN_HAD_SERVICE="no"
+    [ -f "$STATE_FILE" ] && _TXN_HAD_SERVICE="yes"
+    if [ -f "$XRAY_PID" ] && pid_running "$XRAY_PID"; then _TXN_HAD_SERVICE="yes"; fi
+    if has_openrc && [ -f /etc/init.d/suoha-plus-xray ]; then _TXN_HAD_SERVICE="yes"; fi
+    _TXN_ACTIVE=1
+    return 0
+}
+
+txn_commit() {
+    _TXN_ACTIVE=0
+    [ -n "$_TXN_DIR" ] && rm -rf "$_TXN_DIR" 2>/dev/null
+    _TXN_DIR=""
+    return 0
+}
+
+# 回滚：还原配置/状态/全局变量，重建服务单元，按原模式重新拉起服务。
+txn_rollback() {
+    [ "$_TXN_ACTIVE" = "1" ] || return 0
+    _TXN_ACTIVE=0
+    warn '安装未完成，正在回滚到安装前的配置与服务状态...'
+    local f
+    for f in "$XRAY_CONFIG" "$CF_CONFIG" "$STATE_FILE"; do
+        if [ -f "$_TXN_DIR/$(basename "$f")" ]; then
+            cp -f "$_TXN_DIR/$(basename "$f")" "$f" 2>/dev/null
+        fi
+    done
+    # shellcheck disable=SC1090
+    [ -f "$_TXN_DIR/vars.env" ] && . "$_TXN_DIR/vars.env"
+    if [ "$_TXN_HAD_SERVICE" = "yes" ]; then
+        install_systemd_units >/dev/null 2>&1 || true
+        install_openrc_units >/dev/null 2>&1 || true
+        if restart_services >/dev/null 2>&1; then
+            ok '回滚完成：安装前的配置与原服务已恢复。'
+        else
+            err "回滚未能自动拉起服务，请手动执行：rc-service suoha-plus-xray restart（或 systemctl restart $SERVICE_XRAY）"
+        fi
+    else
+        ok '回滚完成：安装前的配置已还原（此前没有在跑的服务，未做启动尝试）。'
+    fi
+    [ -n "$_TXN_DIR" ] && rm -rf "$_TXN_DIR" 2>/dev/null
+    _TXN_DIR=""
+    return 0
+}
+
 setup_reality() {
     need_root || return 1
     confirm_overwrite "Reality 直连节点" || return 1
     local old_mode="$MODE" old_reality="$REALITY_ENABLED"
-    stop_services 2>/dev/null || true
-    remove_systemd_units
     MODE="reality"
     REALITY_ENABLED="yes"
     # Reality 只跑 vless+Vision，PROTOCOL 字段在此模式下无意义；
     # 之前会保留默认的 vmess，导致 show_config / state.env 显示"Xray 协议: vmess"误导用户。
     # 保留原值只用于其他模式切回来，但显示与状态统一按 reality 处理。
     ensure_software || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; return 1; }
-    say ""
-    info "正在生成 Reality 密钥（x25519）..."
-    generate_reality_keys || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; return 1; }
-    say ""
     say '请确认 Reality 节点参数（直接回车使用默认值）：'
     REALITY_PORT="$(ask_default 'Reality 监听端口（公网直连）' "$REALITY_PORT")"
     REALITY_DEST="$(ask_default '目标网站 dest（域名或 域名:端口，需支持 TLS1.3+h2）' "$REALITY_DEST")"
@@ -1590,15 +1667,36 @@ setup_reality() {
         *) NODE_ADDRESS="$_addr" ;;
     esac
     UUID="$(ask_default 'UUID' "$UUID")"
-    validate_reality || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; return 1; }
     validate_common || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; return 1; }
-    mkdir -p "$APP_DIR" "$LOG_DIR" "$TMP_DIR"
-    write_xray_config || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; return 1; }
+    mkdir -p "$APP_DIR" "$LOG_DIR" "$TMP_DIR" || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; return 1; }
+    # 从这里开始才允许动服务/改状态。
+    # 顺序很关键：
+    #   1) txn_begin 先快照（此时旧密钥、旧配置都还在）
+    #   2) 再生成新密钥 —— validate_reality 要求私钥非空，全新安装时必须先生成后校验
+    #   3) 最后校验。旧实现在校验前生成密钥、失败后不回滚，
+    #      导致 state.env 是新密钥而还原的 xray.json 用旧私钥，节点链接全部失效。
+    txn_begin || true
+    info "正在生成 Reality 密钥（x25519）..."
+    if ! generate_reality_keys; then
+        MODE="$old_mode"; REALITY_ENABLED="$old_reality"; txn_rollback; return 1
+    fi
+    if ! validate_reality; then
+        MODE="$old_mode"; REALITY_ENABLED="$old_reality"; txn_rollback; return 1
+    fi
+    if ! write_xray_config; then
+        MODE="$old_mode"; REALITY_ENABLED="$old_reality"; txn_rollback; return 1
+    fi
     save_state
+    stop_services 2>/dev/null || true
+    remove_systemd_units
     # 开机自启 + 崩溃拉起：Reality 模式也安装服务单元（systemd/OpenRC）
-    install_systemd_units || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; return 1; }
-    install_openrc_units || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; return 1; }
-    start_xray || return 1
+    if ! install_systemd_units || ! install_openrc_units; then
+        txn_rollback; return 1
+    fi
+    if ! start_xray; then
+        txn_rollback; return 1
+    fi
+    txn_commit
     save_state
     generate_nodes
     print_nodes
@@ -1643,21 +1741,23 @@ setup_quick() {
     need_root || return 1
     confirm_overwrite "Quick Tunnel" || return 1
     local old_mode="$MODE"
-    stop_services 2>/dev/null || true
-    remove_systemd_units
     MODE="quick"
     QUICK_URL=""
     ensure_software || { MODE="$old_mode"; return 1; }
-    configure_xray || return 1
-    configure_tunnel || return 1
-    mkdir -p "$APP_DIR" "$LOG_DIR" "$TMP_DIR"
-    write_xray_config || return 1
+    configure_xray || { MODE="$old_mode"; return 1; }
+    configure_tunnel || { MODE="$old_mode"; return 1; }
+    mkdir -p "$APP_DIR" "$LOG_DIR" "$TMP_DIR" || { MODE="$old_mode"; return 1; }
+    # 所有校验都已通过，从这里开始才允许动服务。
+    txn_begin || true
+    write_xray_config || { MODE="$old_mode"; txn_rollback; return 1; }
     save_state
+    stop_services 2>/dev/null || true
+    remove_systemd_units
     # xray 安装服务单元（自启 + 崩溃拉起）；Quick 隧道地址重启会变，保持 nohup
-    install_systemd_units || { MODE="$old_mode"; return 1; }
-    install_openrc_units || { MODE="$old_mode"; return 1; }
-    start_xray || return 1
-    start_quick_tunnel || return 1
+    if ! install_systemd_units || ! install_openrc_units || ! start_xray || ! start_quick_tunnel; then
+        txn_rollback; return 1
+    fi
+    txn_commit
     save_state
     generate_nodes
     print_nodes
@@ -1677,22 +1777,25 @@ setup_persistent() {
             *) info '保留现有配置，复用授权文件与隧道。' ;;
         esac
     fi
-    stop_services 2>/dev/null || true
     MODE="persistent"
     QUICK_URL=""
     ensure_software || { MODE="$old_mode"; return 1; }
-    configure_xray || return 1
-    configure_tunnel || return 1
-    mkdir -p "$APP_DIR" "$LOG_DIR" "$TMP_DIR"
-    ensure_named_tunnel || return 1
-    route_domain || return 1
-    write_xray_config || return 1
-    write_cloudflared_config || return 1
+    configure_xray || { MODE="$old_mode"; return 1; }
+    configure_tunnel || { MODE="$old_mode"; return 1; }
+    mkdir -p "$APP_DIR" "$LOG_DIR" "$TMP_DIR" || { MODE="$old_mode"; return 1; }
+    ensure_named_tunnel || { MODE="$old_mode"; return 1; }
+    route_domain || { MODE="$old_mode"; return 1; }
+    # 所有校验/授权都已通过，从这里开始才允许动服务。
+    txn_begin || true
+    write_xray_config || { MODE="$old_mode"; txn_rollback; return 1; }
+    write_cloudflared_config || { MODE="$old_mode"; txn_rollback; return 1; }
     save_state
-    install_systemd_units || return 1
-    install_openrc_units || return 1
-    start_xray || return 1
-    start_persistent_tunnel || return 1
+    stop_services 2>/dev/null || true
+    remove_systemd_units
+    if ! install_systemd_units || ! install_openrc_units || ! start_xray || ! start_persistent_tunnel; then
+        txn_rollback; return 1
+    fi
+    txn_commit
     save_state
     generate_nodes
     print_nodes
@@ -1964,6 +2067,8 @@ uninstall_plus() {
     # 删除目录前再兜底杀一次，避免 pidfile 丢失导致 cloudflared/xray 残留
     pkill -f "$BIN_DIR/cloudflared" 2>/dev/null || true
     pkill -f "$BIN_DIR/xray" 2>/dev/null || true
+    # ShadowQuic 只停本项目的，别家的实例保留
+    sq_stop_process 2>/dev/null || true
     sleep 1
     rm -f "$CMD_LINK"
     rm -rf "$APP_DIR"
@@ -2335,7 +2440,7 @@ sq_start() {
         if [ ! -f "$SQ_INIT" ]; then
             # 没有本项目的服务单元。若 /etc/init.d/shadowquic 属于其他项目，绝不接管。
             if [ -f /etc/init.d/shadowquic ] && ! sq_owned; then
-                warn "检测到其他项目的 shadowquic 服务，Suoha Plus 不自动启动它。"
+                warn "检测到其他项目的 shadowquic 服务，Suoha Plus 不自动启动也不删除它。"
                 return 0
             fi
             rc-update del shadowquic default >/dev/null 2>&1 || true
@@ -2352,20 +2457,54 @@ sq_start() {
     sleep 2
 }
 
+# 进程命令行里是否引用了本项目自己的配置/服务脚本。
+# 只认这三个路径，别的一律当外部实例。
+sq_proc_is_ours() {
+    case "$1" in
+        *"$SQ_INIT"*|*/suoha-quic-daemon.sh*|*"$SQ_APP_DIR/server-direct.yaml"*|*"$SQ_APP_DIR/server-socks.yaml"*)
+            return 0 ;;
+    esac
+    return 1
+}
+
+sq_pids_ours() {
+    command_exists pgrep || return 0
+    local p cmd
+    for p in $(pgrep -f '[s]hadowquic' 2>/dev/null); do
+        [ "$p" = "$$" ] && continue
+        cmd="$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)"
+        [ -n "$cmd" ] || continue
+        sq_proc_is_ours "$cmd" && printf '%s\n' "$p"
+    done
+    return 0
+}
+
 sq_stop_process() {
-    # 停掉 suoha 管的服务（含可能被接管的旧服务）
-    if has_systemd; then
+    # 只停本项目自己的实例。
+    # 旧实现末尾无条件 `pgrep -f '[s]hadowquic' | kill -9`，同机其他项目（或用户手动起的
+    # 客户端）只要命令行里带 shadowquic 就会被一起杀掉。实测 3 个进程停完只剩 0 个。
+    if has_systemd && [ -f "$SQ_UNIT" ]; then
         systemctl stop suoha-shadowquic 2>/dev/null || true
-        systemctl stop shadowquic 2>/dev/null || true
     fi
-    [ -f /etc/init.d/shadowquic ] && /etc/init.d/shadowquic stop 2>/dev/null || true
-    [ -f "$SQ_INIT" ] && /etc/init.d/suoha-shadowquic stop 2>/dev/null || true
-    pkill -f '[s]hadowquic -c' 2>/dev/null || true
-    pkill -f '[s]hadowquic-daemon.sh' 2>/dev/null || true
-    pkill -f '[s]uoha-quic-daemon.sh' 2>/dev/null || true
-    if command_exists pgrep; then
-        for p in $(pgrep -f '[s]hadowquic'); do kill -9 "$p" 2>/dev/null || true; done
+    if [ -f "$SQ_INIT" ]; then
+        rc-service suoha-shadowquic stop 2>/dev/null ||             /etc/init.d/suoha-shadowquic stop 2>/dev/null || true
     fi
+    # 被接管的旧服务：仅当配置目录已由本脚本认领时才停
+    if [ -f /etc/init.d/shadowquic ] && sq_owned; then
+        /etc/init.d/shadowquic stop 2>/dev/null || true
+    fi
+    local p
+    for p in $(sq_pids_ours); do
+        kill "$p" 2>/dev/null || true
+    done
+    local i=0
+    while [ "$i" -lt 5 ]; do
+        [ -z "$(sq_pids_ours)" ] && break
+        sleep 1; i=$((i + 1))
+    done
+    for p in $(sq_pids_ours); do
+        kill -9 "$p" 2>/dev/null || true
+    done
     sleep 1
 }
 
@@ -2439,16 +2578,25 @@ sq_setup() {
     else
         warn "端口未监听，查看日志：tail -50 $SQ_LOG"
     fi
-    # 清理旧的 shadowquic 服务注册（已被 suoha-shadowquic 取代，防止开机双启）
+    # 清理旧的 shadowquic 服务注册（已被 suoha-shadowquic 取代，防止开机双启）。
+    # 只在配置目录确实属于本脚本时才删，避免拆掉其他项目的服务单元。
     if [ -f /etc/init.d/shadowquic ]; then
-        rc-update del shadowquic default >/dev/null 2>&1 || true
-        rm -f /etc/init.d/shadowquic
-        info '已移除旧的 shadowquic 服务（配置由本脚本接管）。'
+        if sq_owned; then
+            rc-update del shadowquic default >/dev/null 2>&1 || true
+            rm -f /etc/init.d/shadowquic
+            info '已移除旧的 shadowquic 服务（配置由本脚本接管）。'
+        else
+            warn '检测到 /etc/init.d/shadowquic 属于其他项目，已保留未删除。'
+        fi
     fi
     if [ -f /etc/systemd/system/shadowquic.service ]; then
-        systemctl disable shadowquic >/dev/null 2>&1 || true
-        rm -f /etc/systemd/system/shadowquic.service; systemctl daemon-reload 2>/dev/null || true
-        info '已移除旧的 shadowquic systemd 服务。'
+        if sq_owned; then
+            systemctl disable shadowquic >/dev/null 2>&1 || true
+            rm -f /etc/systemd/system/shadowquic.service; systemctl daemon-reload 2>/dev/null || true
+            info '已移除旧的 shadowquic systemd 服务。'
+        else
+            warn '检测到 shadowquic.service 属于其他项目，已保留未删除。'
+        fi
     fi
     sq_show_info
     save_state
@@ -2614,7 +2762,7 @@ load_state
 # 所以所有 nohup 启动处都必须带 9>&-，否则脚本退出后锁被常驻服务持有，
 # 用户将再也无法打开本脚本。
 if command_exists flock; then
-    if exec 9>"$LOCK_FILE" 2>/dev/null; then
+    if { exec 9>"$LOCK_FILE"; } 2>/dev/null; then
         flock -n 9 2>/dev/null || { err '另一个 Suoha Plus 实例正在运行，请稍后重试。'; exit 1; }
     fi
 fi
