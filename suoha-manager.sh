@@ -42,7 +42,7 @@ if [ -z "${SUOHA_TTY:-}" ] && [ ! -t 0 ] && [ "$#" -eq 0 ]; then
 fi
 
 APP_NAME="suoha-plus"
-APP_VERSION="2.6.2"
+APP_VERSION="2.6.3"
 APP_DIR="/opt/suoha-plus"
 BIN_DIR="$APP_DIR/bin"
 LOG_DIR="$APP_DIR/logs"
@@ -62,8 +62,10 @@ LOCK_FILE="/tmp/suoha-plus.lock"
 SERVICE_XRAY="suoha-plus-xray.service"
 SERVICE_CF="suoha-plus-cloudflared.service"
 
-XRAY_VERSION="${SUOHA_XRAY_VERSION:-v26.3.27}"
-CLOUDFLARED_VERSION="${SUOHA_CLOUDFLARED_VERSION:-2026.8.2}"
+BASE_XRAY_VERSION="v26.3.27"
+BASE_CLOUDFLARED_VERSION="2026.8.2"
+XRAY_VERSION="${SUOHA_XRAY_VERSION:-$BASE_XRAY_VERSION}"
+CLOUDFLARED_VERSION="${SUOHA_CLOUDFLARED_VERSION:-$BASE_CLOUDFLARED_VERSION}"
 SQ_PORT="1443"
 # 固定版本是刻意设计（可复现、不受上游更新影响）。
 # 但提供两条升级通道：
@@ -111,6 +113,26 @@ fi
 
 say() { printf '%b\n' "$*"; }
 
+# POSIX 单引号转义。busybox/musl 的 printf 不支持 %q：
+# 实测 Alpine 下用 sh 跑一次安装，21 行 %q 全报 invalid format，
+# state.env 被写成 "MODE=PROTOCOL=EDGE_IP=...=" 一行垃圾，状态全丢。
+shquote() {
+    local s="${1:-}" out="" i=0 c
+    while [ "$i" -lt "${#s}" ]; do
+        c="${s:$i:1}"
+        if [ "$c" = "'" ]; then
+            out="$out'\''"
+        else
+            out="$out$c"
+        fi
+        i=$((i + 1))
+    done
+    printf "'%s'" "$out"
+}
+
+# 写一行 KEY=值（POSIX 单引号），save_state 与 txn_begin 共用。
+state_line() { printf '%s=%s\n' "$1" "$(shquote "${2-}")"; }
+
 # 安装过程中的临时目录（mktemp -d 创建），正常结束或异常退出都清理。
 _cleanup_paths=""
 
@@ -120,14 +142,6 @@ lock_release() {
     if [ -e /proc/$$/fd/9 ]; then
         exec 9>&-
     fi
-    return 0
-}
-
-lock_acquire() {
-    command_exists flock || return 0
-    [ -n "$LOCK_FILE" ] || return 0
-    { exec 9>"$LOCK_FILE"; } 2>/dev/null || return 0
-    flock -n 9 2>/dev/null || return 0
     return 0
 }
 
@@ -250,12 +264,21 @@ init_defaults() {
 
 load_state() {
     if [ -r "$STATE_FILE" ]; then
-        # state.env 由本脚本以 %q 写入，仅加载本脚本自己的状态文件。
+        # state.env 由 state_line() 写入（POSIX 单引号转义），只加载自己的状态文件。
         # shellcheck disable=SC1090
         . "$STATE_FILE"
     fi
     # state.env 里可能记录了升级后的组件版本（SUOHA_XRAY_VERSION 等），
     # 下载基址必须跟着重算，否则仍会用旧的 tag 拼 URL 导致 404。
+    # state.env may carry upgraded component versions. XRAY_VERSION was
+    # evaluated at the top before state.env was sourced, so the upgrade
+    # got silently replaced by the built-in default. Sync here.
+    if [ -n "${SUOHA_XRAY_VERSION:-}" ]; then
+        XRAY_VERSION="$SUOHA_XRAY_VERSION"
+    fi
+    if [ -n "${SUOHA_CLOUDFLARED_VERSION:-}" ]; then
+        CLOUDFLARED_VERSION="$SUOHA_CLOUDFLARED_VERSION"
+    fi
     refresh_release_bases
     init_defaults
 }
@@ -264,30 +287,30 @@ save_state() {
     mkdir -p "$APP_DIR" "$LOG_DIR" "$TMP_DIR" || return 1
     umask 077
     {
-        printf 'MODE=%q\n' "$MODE"
-        printf 'PROTOCOL=%q\n' "$PROTOCOL"
-        printf 'EDGE_IP=%q\n' "$EDGE_IP"
-        printf 'CF_PROTOCOL=%q\n' "$CF_PROTOCOL"
-        printf 'NODE_ADDRESS=%q\n' "$NODE_ADDRESS"
-        printf 'UUID=%q\n' "$UUID"
-        printf 'WS_PATH=%q\n' "$WS_PATH"
-        printf 'XRAY_PORT=%q\n' "$XRAY_PORT"
-        printf 'QUICK_URL=%q\n' "$QUICK_URL"
-        printf 'SQ_PORT=%q\n' "$SQ_PORT"
-        printf 'DOMAIN=%q\n' "$DOMAIN"
-        printf 'TUNNEL_NAME=%q\n' "$TUNNEL_NAME"
-        printf 'TUNNEL_ID=%q\n' "$TUNNEL_ID"
-        printf 'ISP_TAG=%q\n' "$ISP_TAG"
-        printf 'REALITY_ENABLED=%q\n' "$REALITY_ENABLED"
-        printf 'REALITY_PORT=%q\n' "$REALITY_PORT"
-        printf 'REALITY_DEST=%q\n' "$REALITY_DEST"
-        printf 'REALITY_SNI=%q\n' "$REALITY_SNI"
-        printf 'REALITY_PRIVATE=%q\n' "$REALITY_PRIVATE"
-        printf 'REALITY_PUBLIC=%q\n' "$REALITY_PUBLIC"
-        printf 'REALITY_SHORT_ID=%q\n' "$REALITY_SHORT_ID"
-        # 组件版本持久化：菜单 9 升级后必须记住，否则重开菜单又回到脚本内置版本。
-        printf 'SUOHA_XRAY_VERSION=%q\n' "$XRAY_VERSION"
-        printf 'SUOHA_CLOUDFLARED_VERSION=%q\n' "$CLOUDFLARED_VERSION"
+        state_line MODE "$MODE"
+        state_line PROTOCOL "$PROTOCOL"
+        state_line EDGE_IP "$EDGE_IP"
+        state_line CF_PROTOCOL "$CF_PROTOCOL"
+        state_line NODE_ADDRESS "$NODE_ADDRESS"
+        state_line UUID "$UUID"
+        state_line WS_PATH "$WS_PATH"
+        state_line XRAY_PORT "$XRAY_PORT"
+        state_line QUICK_URL "$QUICK_URL"
+        state_line SQ_PORT "$SQ_PORT"
+        state_line DOMAIN "$DOMAIN"
+        state_line TUNNEL_NAME "$TUNNEL_NAME"
+        state_line TUNNEL_ID "$TUNNEL_ID"
+        state_line ISP_TAG "$ISP_TAG"
+        state_line REALITY_ENABLED "$REALITY_ENABLED"
+        state_line REALITY_PORT "$REALITY_PORT"
+        state_line REALITY_DEST "$REALITY_DEST"
+        state_line REALITY_SNI "$REALITY_SNI"
+        state_line REALITY_PRIVATE "$REALITY_PRIVATE"
+        state_line REALITY_PUBLIC "$REALITY_PUBLIC"
+        state_line REALITY_SHORT_ID "$REALITY_SHORT_ID"
+        # component versions must persist across runs
+        state_line SUOHA_XRAY_VERSION "$XRAY_VERSION"
+        state_line SUOHA_CLOUDFLARED_VERSION "$CLOUDFLARED_VERSION"
     } > "$STATE_FILE"
     chmod 600 "$STATE_FILE"
 }
@@ -314,6 +337,13 @@ validate_common() {
     if [ -n "$NODE_ADDRESS" ]; then
         case "$NODE_ADDRESS" in
             *[!A-Za-z0-9._:\[\]-]*) err "节点地址只能包含域名、IPv4、IPv6（[方括号]）和端口所需字符。"; return 1 ;;
+        esac
+        # 节点地址是要拼进 vless://host:port 的：裸域名/IPv4 只能有 0 个冒号，
+        # IPv6 必须带 [ ]。旧校验允许任意冒号，能写出
+        # www.visa.com:443:444 这种拼出来就废的链接。
+        case "$NODE_ADDRESS" in
+            \[*) : ;;
+            *:*) err "节点地址不能带端号（端口由模式决定）；IPv6 请写成 [地址] 形式。" ; return 1 ;;
         esac
     fi
 }
@@ -663,7 +693,8 @@ version_check() {
         warn '无法获取上游版本（网络问题或 GitHub API 限流）。'
         return 1
     fi
-    if [ -n "$xl" ] && [ "v${xc#v}" != "${xl#v}" ]; then rc=2; fi
+    # compare with v stripped on BOTH sides; old form was always unequal
+    if [ -n "$xl" ] && [ "${xc#v}" != "${xl#v}" ]; then rc=2; fi
     if [ -n "$cl" ] && [ "${cc#v}" != "${cl#v}" ]; then rc=2; fi
     if [ "$rc" = "0" ]; then ok '组件均为最新版本。'; fi
     return "$rc"
@@ -776,27 +807,54 @@ validate_reality() {
     fi
     [ -n "$REALITY_DEST" ] || { err "Reality dest 不能为空。"; return 1; }
     # dest 会被原样插进 xray.json 的 JSON 字符串里，必须先做字符白名单，
-    # 否则 " 或 } 能逃出 JSON 结构（对比：域名/隧道名/WS 路径本来就有白名单）。
+    # 否则引号或右花括号能逃出 JSON 结构（域名/隧道名/WS 路径本来就有白名单）。
     # 注意：bash 的 [[ =~ ]] 里不能写 \[\-]，实测会变成"任何值都不匹配"。
     # 方括号字符类必须把 ] 放最前、- 放最后（经 re_probe2.sh 验证：合法值 5/5 通过，非法值 6/6 拒绝）。
     if ! [[ "$REALITY_DEST" =~ ^[]A-Za-z0-9._:[-]+$ ]]; then
         err "Reality dest 只能包含域名、IPv4/IPv6 和端口字符（不能带引号、空格、斜杠）。"
         return 1
     fi
+    # dest 解析顺序很重要，四种形式分开处理：
+    #   host                       -> host:443
+    #   host:port                  -> 保留
+    #   [v6]                       -> [v6]:443
+    #   [v6]:port                  -> 保留
+    # 裸 IPv6（2001:db8::1）必须拒绝：Xray 会把最后一段当端口，
+    # 实测 dest=2001:db8::1 → "please fill in a valid value for target"，
+    # 而本脚本旧校验会把它当成 port=1 放行。
+    # dest 解析：先判断是否 IPv6 字面量（含冒号且带方括号），再补默认端口。
+    # 裸 IPv6（2001:db8::1）必须拒绝：Xray 会把最后一段当端口，
+    # 实测 dest=2001:db8::1 → "please fill in a valid value for target"，
+    # 而旧校验会把最后一段 1 当端口放行。
     case "$REALITY_DEST" in
-        *:*) : ;;
-        *) REALITY_DEST="$REALITY_DEST:443" ;;
+        \[*)
+            # 已带 [ ] 的 IPv6：有 "]:" 就是 [v6]:port，否则补 :443
+            case "$REALITY_DEST" in
+                *\]:*) : ;;
+                *) REALITY_DEST="$REALITY_DEST:443" ;;
+            esac ;;
+        *:*)
+            : ;;                    # host:port
+        *)
+            REALITY_DEST="$REALITY_DEST:443" ;;
     esac
-    # 补完端口后检查端口段合法（域名:abc 这类要拦住）
+    # 裸 IPv6：冒号 >= 2 且不以 '[' 开头（host:port 只有 1 个冒号）
+    _dcolons="$(printf '%s' "$REALITY_DEST" | tr -cd ':' | wc -c)"
     case "$REALITY_DEST" in
-        *:*) 
-            local _dport="${REALITY_DEST##*:}"
-            if ! [[ "$_dport" =~ ^[0-9]+$ ]] || [ "$_dport" -lt 1 ] || [ "$_dport" -gt 65535 ]; then
-                err "Reality dest 端口不合法：$_dport（应为 1-65535）。"
+        \[*) : ;;
+        *)
+            if [ "${_dcolons:-0}" -ge 2 ]; then
+                err "Reality dest 不能是裸 IPv6，请写成 [IPv6]:端口 形式。"
                 return 1
             fi
             ;;
     esac
+    # 补完端口后检查端口段合法（域名:abc 这类要拦住）
+    local _dport="${REALITY_DEST##*:}"
+    if ! [[ "$_dport" =~ ^[0-9]+$ ]] || [ "$_dport" -lt 1 ] || [ "$_dport" -gt 65535 ]; then
+        err "Reality dest 端口不合法：$_dport（应为 1-65535）。"
+        return 1
+    fi
     [ -n "$REALITY_SNI" ] || { err "Reality SNI 不能为空。"; return 1; }
     # SNI 同样进入 serverNames 数组，走同一套白名单（不允许 : 和 [ ]）。
     if ! [[ "$REALITY_SNI" =~ ^[A-Za-z0-9._-]+$ ]]; then
@@ -991,6 +1049,9 @@ generate_nodes() {
     local host label tmp json path_q ip4 ip6 raddr ra4 ra6
     host="$(current_tunnel_host)"
     label="$(url_label "$ISP_TAG")"
+    # 节点地址留空时回退到隧道域名；旧实现直接拼 "$NODE_ADDRESS"，
+    # 空值会产生 vless://uuid@:443 / vmess add="" 这种废链接。
+    _waddr="${NODE_ADDRESS:-}"
     ip4="$(public_ip 2>/dev/null || true)"
     ip6="$(public_ip6 2>/dev/null || true)"
     ip6="${ip6#[}"
@@ -1037,50 +1098,31 @@ generate_nodes() {
             if [ -n "$host" ]; then
                 path_q="$(printf '%s' "$WS_PATH" | sed 's/%/%25/g; s#/#%2F#g')"
                 printf '\n# —— WS+隧道节点（与 Reality 共存，域名固定）——\n\n'
-                printf 'vless://%s@%s:443?encryption=none&security=tls&sni=%s&type=ws&host=%s&path=%s#%s_tls\n' "$UUID" "$host" "$host" "$host" "$path_q" "$label"
+                printf 'vless://%s@%s:443?encryption=none&security=tls&sni=%s&type=ws&host=%s&path=%s#%s_tls\n' "$UUID" "${_waddr:-$host}" "$host" "$host" "$path_q" "$label"
                 printf '\n# TLS 端口可尝试：443、2053、2083、2087、2096、8443\n'
-                printf 'vless://%s@%s:80?encryption=none&security=none&type=ws&host=%s&path=%s#%s\n' "$UUID" "$NODE_ADDRESS" "$host" "$path_q" "$label"
+                printf 'vless://%s@%s:80?encryption=none&security=none&type=ws&host=%s&path=%s#%s\n' "$UUID" "${_waddr:-$host}" "$host" "$path_q" "$label"
                 printf '# 明文端口可尝试：80、8080、8880、2052、2082、2086、2095\n'
                 printf '# 注意：WS 节点的 443 走隧道域名；80 走 NODE_ADDRESS 优选地址\n'
             fi
         elif [ -z "$host" ]; then
             printf '# 隧道尚未启动，启动成功后再次运行本脚本即可生成节点。\n'
         elif [ "$PROTOCOL" = "vmess" ]; then
-            json="$(printf '{"v":"2","ps":"%s_tls","add":"%s","port":"443","id":"%s","aid":"0","net":"ws","type":"none","host":"%s","path":"%s","tls":"tls","sni":"%s"}' "$ISP_TAG" "$NODE_ADDRESS" "$UUID" "$host" "$WS_PATH" "$host")"
+            json="$(printf '{"v":"2","ps":"%s_tls","add":"%s","port":"443","id":"%s","aid":"0","net":"ws","type":"none","host":"%s","path":"%s","tls":"tls","sni":"%s"}' "$ISP_TAG" "${_waddr:-$host}" "$UUID" "$host" "$WS_PATH" "$host")"
             printf 'vmess://%s\n' "$(printf '%s' "$json" | base64_no_wrap)"
             printf '\n# TLS 端口可尝试：443、2053、2083、2087、2096、8443\n'
-            json="$(printf '{"v":"2","ps":"%s","add":"%s","port":"80","id":"%s","aid":"0","net":"ws","type":"none","host":"%s","path":"%s","tls":""}' "$ISP_TAG" "$NODE_ADDRESS" "$UUID" "$host" "$WS_PATH")"
+            json="$(printf '{"v":"2","ps":"%s","add":"%s","port":"80","id":"%s","aid":"0","net":"ws","type":"none","host":"%s","path":"%s","tls":""}' "$ISP_TAG" "${_waddr:-$host}" "$UUID" "$host" "$WS_PATH")"
             printf 'vmess://%s\n' "$(printf '%s' "$json" | base64_no_wrap)"
             printf '# 明文端口可尝试：80、8080、8880、2052、2082、2086、2095\n'
         else
             path_q="$(printf '%s' "$WS_PATH" | sed 's/%/%25/g; s#/#%2F#g')"
-            printf 'vless://%s@%s:443?encryption=none&security=tls&sni=%s&type=ws&host=%s&path=%s#%s_tls\n' "$UUID" "$NODE_ADDRESS" "$host" "$host" "$path_q" "$label"
+            printf 'vless://%s@%s:443?encryption=none&security=tls&sni=%s&type=ws&host=%s&path=%s#%s_tls\n' "$UUID" "${_waddr:-$host}" "$host" "$host" "$path_q" "$label"
             printf '\n# TLS 端口可尝试：443、2053、2083、2087、2096、8443\n'
-            printf 'vless://%s@%s:80?encryption=none&security=none&type=ws&host=%s&path=%s#%s\n' "$UUID" "$NODE_ADDRESS" "$host" "$path_q" "$label"
+            printf 'vless://%s@%s:80?encryption=none&security=none&type=ws&host=%s&path=%s#%s\n' "$UUID" "${_waddr:-$host}" "$host" "$path_q" "$label"
             printf '# 明文端口可尝试：80、8080、8880、2052、2082、2086、2095\n'
         fi
     } > "$tmp"
     chmod 600 "$tmp"
     mv -f "$tmp" "$NODE_FILE"
-    # ShadowQuic 链接追加到节点文件
-    if [ -f "$SQ_APP_DIR/server-direct.yaml" ]; then
-        local sq_u sq_p sq_host sq_label
-        sq_u="$(sed -n 's/.*username: "\([^"]*\)".*/\1/p' "$SQ_APP_DIR/server-direct.yaml" 2>/dev/null | head -1)"
-        sq_p="$(sed -n 's/.*password: "\([^"]*\)".*/\1/p' "$SQ_APP_DIR/server-direct.yaml" 2>/dev/null | head -1)"
-        sq_host="$(sed -n 's/.*server-name: "\([^"]*\)".*/\1/p' "$SQ_APP_DIR/server-direct.yaml" 2>/dev/null | head -1)"
-        sq_label="$(url_label "${ISP_TAG}_sq")"
-        {
-            printf '\n# —— ShadowQuic 节点（UDP :%s，sq:// 部分客户端支持）——\n\n' "$SQ_PORT"
-            if [ -n "$(public_ip 2>/dev/null)" ]; then
-                printf 'sq://%s:%s@%s:%s?alpn=h3&mtu=1280&sni=%s&udp_mode=datagram&zero_rtt=true#%s_v4\n' "$sq_u" "$sq_p" "$(public_ip)" "$SQ_PORT" "$sq_host" "$sq_label"
-            fi
-            local sq6; sq6="$(public_ip6 2>/dev/null)"; sq6="${sq6#[}"
-            if [ -n "$sq6" ]; then
-                printf 'sq://%s:%s@[%s]:%s?alpn=h3&mtu=1280&sni=%s&udp_mode=datagram&zero_rtt=true#%s_v6\n' "$sq_u" "$sq_p" "$sq6" "$SQ_PORT" "$sq_host" "$sq_label"
-            fi
-            printf '\n# ShadowQuic 配置：/etc/shadowquic/server-direct.yaml（直连出站）/ server-socks.yaml（SOCKS出站）/ last-mode\n'
-        } >> "$NODE_FILE"
-    fi
 }
 
 print_nodes() {
@@ -1578,25 +1620,25 @@ txn_begin() {
         [ -f "$f" ] && cp -f "$f" "$_TXN_DIR/$(basename "$f")" 2>/dev/null
     done
     {
-        printf 'MODE=%q\n' "$MODE"
-        printf 'PROTOCOL=%q\n' "$PROTOCOL"
-        printf 'EDGE_IP=%q\n' "$EDGE_IP"
-        printf 'CF_PROTOCOL=%q\n' "$CF_PROTOCOL"
-        printf 'NODE_ADDRESS=%q\n' "$NODE_ADDRESS"
-        printf 'UUID=%q\n' "$UUID"
-        printf 'WS_PATH=%q\n' "$WS_PATH"
-        printf 'XRAY_PORT=%q\n' "$XRAY_PORT"
-        printf 'QUICK_URL=%q\n' "$QUICK_URL"
-        printf 'DOMAIN=%q\n' "$DOMAIN"
-        printf 'TUNNEL_NAME=%q\n' "$TUNNEL_NAME"
-        printf 'TUNNEL_ID=%q\n' "$TUNNEL_ID"
-        printf 'REALITY_ENABLED=%q\n' "$REALITY_ENABLED"
-        printf 'REALITY_PORT=%q\n' "$REALITY_PORT"
-        printf 'REALITY_DEST=%q\n' "$REALITY_DEST"
-        printf 'REALITY_SNI=%q\n' "$REALITY_SNI"
-        printf 'REALITY_PRIVATE=%q\n' "$REALITY_PRIVATE"
-        printf 'REALITY_PUBLIC=%q\n' "$REALITY_PUBLIC"
-        printf 'REALITY_SHORT_ID=%q\n' "$REALITY_SHORT_ID"
+        state_line MODE "$MODE"
+        state_line PROTOCOL "$PROTOCOL"
+        state_line EDGE_IP "$EDGE_IP"
+        state_line CF_PROTOCOL "$CF_PROTOCOL"
+        state_line NODE_ADDRESS "$NODE_ADDRESS"
+        state_line UUID "$UUID"
+        state_line WS_PATH "$WS_PATH"
+        state_line XRAY_PORT "$XRAY_PORT"
+        state_line QUICK_URL "$QUICK_URL"
+        state_line DOMAIN "$DOMAIN"
+        state_line TUNNEL_NAME "$TUNNEL_NAME"
+        state_line TUNNEL_ID "$TUNNEL_ID"
+        state_line REALITY_ENABLED "$REALITY_ENABLED"
+        state_line REALITY_PORT "$REALITY_PORT"
+        state_line REALITY_DEST "$REALITY_DEST"
+        state_line REALITY_SNI "$REALITY_SNI"
+        state_line REALITY_PRIVATE "$REALITY_PRIVATE"
+        state_line REALITY_PUBLIC "$REALITY_PUBLIC"
+        state_line REALITY_SHORT_ID "$REALITY_SHORT_ID"
     } > "$_TXN_DIR/vars.env"
     _TXN_HAD_SERVICE="no"
     [ -f "$STATE_FILE" ] && _TXN_HAD_SERVICE="yes"
@@ -1604,6 +1646,28 @@ txn_begin() {
     if has_openrc && [ -f /etc/init.d/suoha-plus-xray ]; then _TXN_HAD_SERVICE="yes"; fi
     _TXN_ACTIVE=1
     return 0
+}
+
+# 回滚专用：按快照的旧参数重启服务，但不写 state.env。
+# restart_services 会调 save_state，而此时全局变量已被 txn_rollback 还原成旧值，
+# 写一遍本来无害，但为了彻底避免与快照文件不一致，还是分开写。
+_txn_restart_services() {
+    [ -f "$XRAY_CONFIG" ] || return 1
+    if [ "$REALITY_ENABLED" = "yes" ]; then
+        stop_services >/dev/null 2>&1 || true
+        start_xray || return 1
+        [ -f "$CF_CONFIG" ] && start_persistent_tunnel || true
+        return 0
+    fi
+    if [ "$MODE" = "persistent" ]; then
+        stop_services >/dev/null 2>&1 || true
+        start_xray || return 1
+        start_persistent_tunnel || return 1
+        return 0
+    fi
+    stop_services >/dev/null 2>&1 || true
+    start_xray || return 1
+    start_quick_tunnel || return 1
 }
 
 txn_commit() {
@@ -1629,7 +1693,9 @@ txn_rollback() {
     if [ "$_TXN_HAD_SERVICE" = "yes" ]; then
         install_systemd_units >/dev/null 2>&1 || true
         install_openrc_units >/dev/null 2>&1 || true
-        if restart_services >/dev/null 2>&1; then
+        # 回滚时不能调 restart_services 再 save_state：它会用当前全局变量（即用户刚填的错误参数）
+        # 重写 state.env，把刚才还原的好状态再次污染。这里只重启服务，不碰状态文件。
+        if _txn_restart_services >/dev/null 2>&1; then
             ok '回滚完成：安装前的配置与原服务已恢复。'
         else
             err "回滚未能自动拉起服务，请手动执行：rc-service suoha-plus-xray restart（或 systemctl restart $SERVICE_XRAY）"
@@ -1652,6 +1718,10 @@ setup_reality() {
     # 之前会保留默认的 vmess，导致 show_config / state.env 显示"Xray 协议: vmess"误导用户。
     # 保留原值只用于其他模式切回来，但显示与状态统一按 reality 处理。
     ensure_software || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; return 1; }
+    # 事务快照必须在读取用户输入之前。
+    # 实测事故：旧代码在问完参数、填了非法 dest 之后才 txn_begin，
+    # 快照里存的已经是非法值，回滚等于把坏值重新写回 state.env。
+    txn_begin || true
     say '请确认 Reality 节点参数（直接回车使用默认值）：'
     REALITY_PORT="$(ask_default 'Reality 监听端口（公网直连）' "$REALITY_PORT")"
     REALITY_DEST="$(ask_default '目标网站 dest（域名或 域名:端口，需支持 TLS1.3+h2）' "$REALITY_DEST")"
@@ -1675,7 +1745,6 @@ setup_reality() {
     #   2) 再生成新密钥 —— validate_reality 要求私钥非空，全新安装时必须先生成后校验
     #   3) 最后校验。旧实现在校验前生成密钥、失败后不回滚，
     #      导致 state.env 是新密钥而还原的 xray.json 用旧私钥，节点链接全部失效。
-    txn_begin || true
     info "正在生成 Reality 密钥（x25519）..."
     if ! generate_reality_keys; then
         MODE="$old_mode"; REALITY_ENABLED="$old_reality"; txn_rollback; return 1
@@ -1740,16 +1809,22 @@ reality_default_address() {
 setup_quick() {
     need_root || return 1
     confirm_overwrite "Quick Tunnel" || return 1
-    local old_mode="$MODE"
+    local old_mode="$MODE" old_reality="$REALITY_ENABLED"
     MODE="quick"
+    # 模式切换必须清掉 Reality 开关。旧实现没清：
+    # 装过 Reality 再装 Quick，REALITY_ENABLED 仍是 yes，
+    # generate_nodes 走 Reality 分支，写出 pbk=/sid= 的假 Reality 节点，
+    # 且 NODE_ADDRESS 为空时拼出 vless://uuid@0:8443 这种坏链接。
+    REALITY_ENABLED="no"
     QUICK_URL=""
-    ensure_software || { MODE="$old_mode"; return 1; }
-    configure_xray || { MODE="$old_mode"; return 1; }
-    configure_tunnel || { MODE="$old_mode"; return 1; }
-    mkdir -p "$APP_DIR" "$LOG_DIR" "$TMP_DIR" || { MODE="$old_mode"; return 1; }
-    # 所有校验都已通过，从这里开始才允许动服务。
+    ensure_software || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; return 1; }
+    # 事务快照必须在读取用户输入之前（同 setup_reality）。
     txn_begin || true
-    write_xray_config || { MODE="$old_mode"; txn_rollback; return 1; }
+    configure_xray || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; txn_rollback; return 1; }
+    configure_tunnel || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; txn_rollback; return 1; }
+    mkdir -p "$APP_DIR" "$LOG_DIR" "$TMP_DIR" || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; txn_rollback; return 1; }
+    # 所有校验都已通过，从这里开始才允许动服务。
+    write_xray_config || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; txn_rollback; return 1; }
     save_state
     stop_services 2>/dev/null || true
     remove_systemd_units
@@ -1761,6 +1836,9 @@ setup_quick() {
     save_state
     generate_nodes
     print_nodes
+    # Quick 模式此前不装管理命令，用户第一次装完 Quick 时没有 suoha-plus 可用。
+    install_cmd_link
+    ok "Quick Tunnel 安装完成；管理命令：$CMD_LINK"
 }
 
 setup_persistent() {
@@ -1778,8 +1856,11 @@ setup_persistent() {
         esac
     fi
     MODE="persistent"
+    # 同 setup_quick：从 Reality 切过来必须关掉 REALITY_ENABLED。
+    local old_reality="$REALITY_ENABLED"
+    REALITY_ENABLED="no"
     QUICK_URL=""
-    ensure_software || { MODE="$old_mode"; return 1; }
+    ensure_software || { MODE="$old_mode"; REALITY_ENABLED="$old_reality"; return 1; }
     configure_xray || { MODE="$old_mode"; return 1; }
     configure_tunnel || { MODE="$old_mode"; return 1; }
     mkdir -p "$APP_DIR" "$LOG_DIR" "$TMP_DIR" || { MODE="$old_mode"; return 1; }
@@ -2028,7 +2109,22 @@ manual_edit_config() {
     safe_read m '请选择: ' ''
     local sq_file
     case "${m:-0}" in
-        1) "$editor" "$XRAY_CONFIG" && apply_config_now || true ;;
+        1)
+            # 旧实现调 apply_config_now，它会 write_xray_config 按 state 变量整份重写，
+            # 用户手改的内容（改 loglevel、加路由、换 outbound）全部被覆盖 —— 菜单写的是
+            # “保存后自动校验重启生效”，实际是“保存后还原成脚本生成版”。
+            # 现在：只做 xray -test 校验 + 重启，配置原样保留。
+            "$editor" "$XRAY_CONFIG" || true
+            if [ -x "$XRAY_BIN" ] && [ -f "$XRAY_CONFIG" ]; then
+                if "$XRAY_BIN" run -test -config "$XRAY_CONFIG" >/dev/null 2>&1; then
+                    restart_services || warn '配置校验通过，但服务重启失败。'
+                else
+                    err '配置校验失败，未重启；请检查 $XRAY_CONFIG 的语法。'
+                    "$XRAY_BIN" run -test -config "$XRAY_CONFIG" 2>&1 | tail -n 10
+                    pause_screen
+                fi
+            fi
+            ;;
         2) [ -f "$CF_CONFIG" ] && "$editor" "$CF_CONFIG" && restart_services || warn '隧道配置文件不存在（Quick 模式自动生成）。' ;;
         3) [ -f "$SQ_APP_DIR/server-direct.yaml" ] && "$editor" "$SQ_APP_DIR/server-direct.yaml" && sq_start || warn 'ShadowQuic 尚未安装。' ;;
         4) [ -f "$SQ_APP_DIR/server-socks.yaml" ] && "$editor" "$SQ_APP_DIR/server-socks.yaml" || warn 'ShadowQuic 尚未安装。' ;;
@@ -2196,7 +2292,6 @@ SQ_BIN="/usr/local/bin/shadowquic"
 SQ_LOG="/var/log/suoha-sq.log"
 SQ_UNIT="/etc/systemd/system/suoha-shadowquic.service"
 SQ_INIT="/etc/init.d/suoha-shadowquic"
-SQ_CMD="/usr/local/bin/suoha-quic"
 
 sq_installed() { [ -x "$SQ_BIN" ]; }
 
@@ -2280,20 +2375,6 @@ sq_upgrade() {
         "$SQ_BIN" || return 1
     sq_download_bin "$latest" 1 || return 1
     sq_start && ok '升级完成，服务已重启。'
-}
-
-sq_detect_service() {
-    # 返回 "systemd" / "openrc" / "manual"，同时识别旧的 shadowquic 服务名（兼容接管）
-    if has_systemd && { [ -f "$SQ_UNIT" ] || [ -f /etc/systemd/system/shadowquic.service ] || ls /lib/systemd/system/shadowquic* >/dev/null 2>&1; }; then
-        printf 'systemd'
-    elif [ -f /etc/init.d/shadowquic ] || [ -f "$SQ_INIT" ]; then
-        rc-update add suoha-shadowquic default >/dev/null 2>&1 || true
-        printf 'openrc'
-    elif has_systemd; then
-        printf 'systemd'
-    else
-        printf 'manual'
-    fi
 }
 
 sq_random() {
@@ -2514,7 +2595,9 @@ sq_status_line() {
         [ "$(systemctl is-active suoha-shadowquic 2>/dev/null)" = "active" ] && st="运行中"
     elif has_openrc && [ -f "$SQ_INIT" ]; then
         case "$(rc-service suoha-shadowquic status 2>&1 || true)" in *started*) st="运行中" ;; esac
-    elif pgrep -f '[s]hadowquic' >/dev/null 2>&1; then
+    elif [ -n "$(sq_pids_ours 2>/dev/null)" ]; then
+        # 只有本项目的进程才算运行中；旧写法用裸 pgrep，
+        # 同机其他项目的 shadowquic 也会让菜单显示“运行中”。
         st="运行中"
     fi
     if [ "$st" = "运行中" ]; then
@@ -2698,6 +2781,8 @@ sq_menu() {
 
 main_menu() {
     while true; do
+        # 日志轮转（此前 rotate_all_logs 是死代码，日志会无限增长）
+        rotate_all_logs
         banner
         if [ -f "$STATE_FILE" ]; then
             show_status
@@ -2734,7 +2819,19 @@ main_menu() {
 }
 
 case "${1:-}" in
-    --version|-v) printf '%s %s | Xray %s | cloudflared %s\n' "$APP_NAME" "$APP_VERSION" "$XRAY_VERSION" "$CLOUDFLARED_VERSION"; exit 0 ;;
+    --version|-v)
+        # 读实际安装的二进制版本，而不是脚本内置值（升级后两者会不一致）。
+        _xv="$XRAY_VERSION"; _cv="$CLOUDFLARED_VERSION"
+        if [ -x "$XRAY_BIN" ]; then
+            _xr="$("$XRAY_BIN" version 2>/dev/null | head -n 1 | awk '{print $2}')"
+            [ -n "$_xr" ] && _xv="v${_xr#v}"
+        fi
+        if [ -x "$CF_BIN" ]; then
+            _cr="$("$CF_BIN" version 2>/dev/null | head -n 1 | awk '{print $3}')"
+            [ -n "$_cr" ] && _cv="$_cr"
+        fi
+        printf '%s %s | Xray %s | cloudflared %s\n' "$APP_NAME" "$APP_VERSION" "$_xv" "$_cv"
+        exit 0 ;;
     --help|-h)
         cat <<EOF
 用法：sudo bash $0

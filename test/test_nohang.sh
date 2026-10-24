@@ -78,7 +78,7 @@ fi
 
 # ===== 4. 下载必须有耗时/超时反馈 =====
 echo "[4] 下载耗时反馈"
-for pat in '最长等' '下载完成，耗时'; do
+for pat in '最长等' '下载完成：'; do
     if grep -q "$pat" "$S"; then ok "含「$pat」提示"; else bad "缺少「$pat」提示"; fi
 done
 

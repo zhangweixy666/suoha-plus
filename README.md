@@ -6,7 +6,7 @@
 
 <p>Reality 直连 · Cloudflare Tunnel · ShadowQuic —— 三条链路，一条命令</p>
 
-[![Version](https://img.shields.io/badge/version-v2.6.2-2ea44f?style=for-the-badge)](https://github.com/zhangweixy666/suoha-plus)
+[![Version](https://img.shields.io/badge/version-v2.6.3-2ea44f?style=for-the-badge)](https://github.com/zhangweixy666/suoha-plus)
 [![Platform](https://img.shields.io/badge/platform-Debian%20%7C%20Ubuntu%20%7C%20Alpine-0078d7?style=for-the-badge)](#-系统要求)
 [![Shell](https://img.shields.io/badge/shell-bash%20%2B%20POSIX-4eaa25?style=for-the-badge)](#-系统要求)
 [![License](https://img.shields.io/badge/license-CC--BY--SA--4.0-lightgrey?style=for-the-badge)](#-致谢与许可)
@@ -168,7 +168,7 @@ suoha-plus --help
 
 ```text
 ╔══════════════════════════════════════════════╗
-║  Suoha Plus  v2.6.2                          ║
+║  Suoha Plus  v2.6.3                          ║
 ║  Xray v26.3.27  |  cloudflared 2026.8.2      ║
 ╚══════════════════════════════════════════════╝
 
@@ -418,6 +418,22 @@ sh test/run.sh
 ---
 
 ## 📜 更新日志
+
+### v2.6.3 — 二次真机实测：修 9 个实际缺陷（含 2 个 P0）
+
+> 本轮全部在真实 Alpine VPS（OpenRC + busybox）上跑通：Reality / Quick Tunnel / ShadowQuic 三协议端到端 200，回滚、升级、卸载全流程验证。
+
+- 🚨 **P0-1 `sh` 下 state.env 被写成一行垃圾**：busybox/musl 的 `printf` 不支持 `%q`，21 处 `printf 'KEY=%q'` 全部报 `invalid format`，结果 `state.env` 变成 `MODE=PROTOCOL=EDGE_IP=...=`，所有状态丢失。新增 `shquote()` / `state_line()` 做 POSIX 单引号转义，全平台一致。
+- 🚨 **P0-2 回滚反而污染配置**：`txn_begin` 在“问完参数”之后才执行，快照里存的已经是用户刚填的非法值；失败回滚时又把坏值写回 `state.env`，出现「回滚完成」但菜单显示 `bad sni!` 而实际配置是旧值。快照前移到读输入之前，并新增 `_txn_restart_services()` 让回滚只重启服务、不再写状态文件。
+- 🎯 **升级后的版本号丢失，重装直接降级**：`XRAY_VERSION` 在脚本顶部求值，那时 `state.env` 还没加载，`SUOHA_XRAY_VERSION` 被脚本内置值覆盖。`load_state` 里补显式同步（实测：升级到 v26.10.21，重开仍显示 v26.10.21，重装不再降级）。
+- 📊 **版本检查恒定误报「有新版本」**：比较写成 `v${xc#v}` vs `${xl#v}`，一边带 v 一边不带，永远不等。改为两边都剥 `v` 前缀。
+- 🌐 **Reality dest 裸 IPv6 放行但 Xray 不认**：`2001:db8::1` 的末段被当端口 `port=1` 放行，Xray 实际报 `please fill in a valid value for target`。现在裸 IPv6 直接拒绝并提示写 `[IPv6]:端口`，`[IPv6]` 自动补 `:443`。
+- 🔀 **模式切换残留 Reality 开关**：装过 Reality 再装 Quick，`REALITY_ENABLED` 仍是 `yes`，节点文件写出带 `pbk=/sid=` 的假 Reality 链接，`NODE_ADDRESS` 为空时还会拼出 `vless://uuid@0:8443`。`setup_quick` / `setup_persistent` 进入即清 `REALITY_ENABLED`，并在失败分支还原。
+- 🔗 **WS/vmess 节点地址为空时生成坏链接**：`@:443`、`add:""`。改为回退到隧道域名。
+- ✏️ **菜单 5→4→1 手改配置立刻被覆盖**：保存后走 `apply_config_now` → `write_xray_config`，按 state 变量整份重写。现在只做 `xray -test` 校验 + 重启，手改内容保留。
+- 🧹 **死代码与遗漏**：`rotate_all_logs` 从未被调用（日志无限增长）已挂到主菜单；删除 `lock_acquire` / `sq_detect_service` / `SQ_CMD`；Quick 模式补上 `install_cmd_link`（此前装完 Quick 没有 `suoha-plus` 命令）；`--version` 改读实际二进制版本；`sq_status_line` 的 `pgrep` 兜底改为只认本项目进程；`banner` 边框改为按固定宽度填充，版本号变长不再歪。
+
+**测试脚本同步修复**：`extract_funcs.sh` 原先被注释里的 `" 或 }` 干扰，抽取出的 lib 语法错误导致全部行为测试假失败；`test_nohang.sh` 断言文案与实际输出不一致；`test_static.sh` 版本断言硬编码。修完 7 套件全过。
 
 ### v2.6.2 — 真机全流程实测后修三个逻辑缺陷
 

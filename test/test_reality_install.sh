@@ -46,7 +46,7 @@ fi
 # ===== 2. 所有 fork 常驻服务的路径都必须先释放锁 =====
 echo "[2] 锁不得被常驻服务继承"
 if grep -q 'lock_release()' "$S"; then ok "存在 lock_release"; else bad "缺少 lock_release"; fi
-if grep -q 'lock_acquire()' "$S"; then ok "存在 lock_acquire"; else bad "缺少 lock_acquire"; fi
+if grep -q 'exec 9>"$LOCK_FILE"' "$S"; then ok "入口持有互斥锁"; else bad "缺少入口互斥锁"; fi
 
 check_release_before() {
     fn="$1"; pat="$2"; label="$3"
