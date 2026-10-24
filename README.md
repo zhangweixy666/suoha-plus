@@ -1,17 +1,17 @@
 <div align="center">
 
-# 🍍 Suoha Plus
+<h1>🍍 Suoha Plus</h1>
 
-**Xray 多模式节点一键管理脚本**
+<p><b>Xray 多模式节点一键管理脚本</b></p>
 
-Reality 直连 · Cloudflare Tunnel · ShadowQuic —— 三条链路，一条命令
+<p>Reality 直连 · Cloudflare Tunnel · ShadowQuic —— 三条链路，一条命令</p>
 
 [![Version](https://img.shields.io/badge/version-v2.6.2-2ea44f?style=for-the-badge)](https://github.com/zhangweixy666/suoha-plus)
 [![Platform](https://img.shields.io/badge/platform-Debian%20%7C%20Ubuntu%20%7C%20Alpine-0078d7?style=for-the-badge)](#-系统要求)
 [![Shell](https://img.shields.io/badge/shell-bash%20%2B%20POSIX-4eaa25?style=for-the-badge)](#-系统要求)
 [![License](https://img.shields.io/badge/license-CC--BY--SA--4.0-lightgrey?style=for-the-badge)](#-致谢与许可)
 
-**无需域名 · 无需证书 · 无需付费 · 中文菜单**
+<p><b>无需域名 · 无需证书 · 无需付费 · 中文菜单</b></p>
 
 [🚀 快速开始](#-快速开始)　·　[🎯 三种模式怎么选](#-三种模式怎么选)　·　[✨ 功能特性](#-功能特性)　·　[❓ 常见问题](#-常见问题)　·　[📜 更新日志](#-更新日志)
 
