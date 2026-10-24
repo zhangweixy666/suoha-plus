@@ -42,7 +42,7 @@ if [ -z "${SUOHA_TTY:-}" ] && [ ! -t 0 ] && [ "$#" -eq 0 ]; then
 fi
 
 APP_NAME="suoha-plus"
-APP_VERSION="2.6.3"
+APP_VERSION="2.6.4"
 APP_DIR="/opt/suoha-plus"
 BIN_DIR="$APP_DIR/bin"
 LOG_DIR="$APP_DIR/logs"
@@ -335,9 +335,13 @@ validate_common() {
     # 节点地址允许为空：空表示"自动双栈"（由 generate_nodes 探测公网 v4/v6 各出一条链接）。
     # 旧实现把 "" 和非法字符写在同一分支里一起 return 1，导致"留空自动"这条路径根本走不通。
     if [ -n "$NODE_ADDRESS" ]; then
-        case "$NODE_ADDRESS" in
-            *[!A-Za-z0-9._:\[\]-]*) err "节点地址只能包含域名、IPv4、IPv6（[方括号]）和端口所需字符。"; return 1 ;;
-        esac
+        # 字符白名单用 grep 而不用 case 通配符：
+        # 实测 busybox/ash 下 `case $v in *[!A-Za-z0-9._:\[\]-]*)` 的字符类会整体失效，
+        # “bad node@#$” 这种垃圾值会被放行（bash 下则正常）。
+        if ! printf '%s' "$NODE_ADDRESS" | grep -qE '^[]A-Za-z0-9._:[-]+$'; then
+            err "节点地址只能包含域名、IPv4、IPv6（[方括号]）和端口所需字符。"
+            return 1
+        fi
         # 节点地址是要拼进 vless://host:port 的：裸域名/IPv4 只能有 0 个冒号，
         # IPv6 必须带 [ ]。旧校验允许任意冒号，能写出
         # www.visa.com:443:444 这种拼出来就废的链接。
@@ -349,11 +353,23 @@ validate_common() {
 }
 
 validate_domain() {
-    case "$1" in
+    local d="$1" IFS=. seg
+    case "$d" in
         ""|*[!A-Za-z0-9.-]*|.*|*-|*.) return 1 ;;
-        *.*) return 0 ;;
+        *.*) : ;;
         *) return 1 ;;
     esac
+    # 逐段校验：每个 label 不能以 - 开头/结尾，不能为空（a..b），长度 1-63。
+    # v2.6.3 之前只看整串首尾，-abc.com / abc-.com / a..b 都能过，
+    # 但 Cloudflare 会拒绝，安装到 route dns 才失败（耗时且状态难看）。
+    for seg in $d; do
+        case "$seg" in
+            ""|-*|*-) return 1 ;;
+        esac
+        [ "${#seg}" -le 63 ] || return 1
+    done
+    [ "${#d}" -le 253 ] || return 1
+    return 0
 }
 
 validate_tunnel_name() {
@@ -656,11 +672,50 @@ net_hint_end() {
     return 0
 }
 
+# 查 GitHub Releases 的 tag。区分“网络不通”与“API 限流”：后者是正常用户很容易碰到的
+# （未认证 60 次/小时），旧实现只说“网络问题或 API 限流”，用户不知道何时能用。
+gh_latest_tag() {
+    local repo="$1" body code remain reset now wait loc tag
+    # 优先用普通食用的 releases/latest 302 重定向拿版本号：
+    # 完全不消耗 GitHub API 配额（未认证仅 60 次/小时，同一机器/出口 IP
+    # 共用配额，实测轾轻就打满，然后所有版本查询全部失败）。
+    loc="$(curl -sS -o /dev/null -D - --max-time 10 \
+        "https://github.com/$repo/releases/latest" 2>/dev/null \
+        | sed -n 's/^[Ll]ocation: *//p' | tr -d '\r' | head -n 1)"
+    case "$loc" in
+        */releases/tag/*)
+            tag="${loc##*/releases/tag/}"
+            [ -n "$tag" ] && { printf '%s\n' "$tag"; return 0; }
+            ;;
+    esac
+    # 回退到 API（可拿到预发布标记等更多信息）
+    body="$(curl -sS --max-time 10 -w '\n__CODE__%{http_code}' \
+        "https://api.github.com/repos/$repo/releases/latest" 2>/dev/null)" || { printf ''; return 1; }
+    code="${body##*__CODE__}"
+    if [ "$code" = "403" ]; then
+        case "$body" in
+            *"rate limit exceeded"*)
+                remain="$(curl -sS --max-time 5 -D - -o /dev/null https://api.github.com/rate_limit 2>/dev/null \
+                    | sed -n 's/^x-ratelimit-reset: *//p' | tr -d '\r' | head -n 1)"
+                if [ -n "$remain" ]; then
+                    now="$(date +%s)"
+                    wait=$(( remain - now ))
+                    [ "$wait" -lt 0 ] && wait=0
+                    printf '%s\n' "[注意] GitHub API 限流（未认证 60 次/小时），约 $(( (wait + 59) / 60 )) 分钟后恢复。" >&2
+                else
+                    printf '%s\n' "[注意] GitHub API 限流（未认证 60 次/小时），请稍后重试。" >&2
+                fi
+                ;;
+        esac
+        printf ''; return 1
+    fi
+    printf '%s\n' "$body" | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/' | head -n 1
+}
+
 xray_latest_version() {
     local v
     net_hint_begin "正在查询 Xray 上游版本"
-    v="$(curl -fsSL --max-time 10 https://api.github.com/repos/XTLS/Xray-core/releases/latest 2>/dev/null \
-         | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/' | head -n 1)"
+    v="$(gh_latest_tag XTLS/Xray-core)"
     net_hint_end
     [ -n "$v" ] || return 1
     printf '%s' "$v"
@@ -669,8 +724,7 @@ xray_latest_version() {
 cloudflared_latest_version() {
     local v
     net_hint_begin "正在查询 cloudflared 上游版本"
-    v="$(curl -fsSL --max-time 10 https://api.github.com/repos/cloudflare/cloudflared/releases/latest 2>/dev/null \
-         | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/' | head -n 1)"
+    v="$(gh_latest_tag cloudflare/cloudflared)"
     net_hint_end
     [ -n "$v" ] || return 1
     # cloudflared 的 tag 形如 2026.8.2，去掉可能的 v 前缀统一比较
@@ -2314,7 +2368,7 @@ sq_latest_version() {
     local v
     # 与 xray_latest_version 保持一致：查询期间给一行提示，别让菜单看起来卡住。
     net_hint_begin "正在查询 shadowquic 上游版本"
-    v="$(curl -fsSL --max-time 8 https://api.github.com/repos/spongebob888/shadowquic/releases/latest 2>/dev/null | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
+    v="$(gh_latest_tag spongebob888/shadowquic)"
     net_hint_end
     [ -n "$v" ] || return 1
     printf '%s' "$v"

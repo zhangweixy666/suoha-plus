@@ -1,6 +1,6 @@
 #!/bin/bash
 # 验证：版本查询提示在 tty / 非 tty 下分别表现如何（含 net_hint_begin/end）
-SRC="/sdcard/Download/suoha-plus/suoha-manager.sh"
+SRC="${1:-$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/suoha-manager.sh}"
 PASS=0; FAIL=0
 ok() { echo "ok  : $*"; PASS=$((PASS+1)); }
 bad() { echo "FAIL: $*"; FAIL=$((FAIL+1)); }
@@ -15,7 +15,7 @@ extract() {
 
 cat > /tmp/vq.sh <<'INNER'
 #!/bin/bash
-SRC="/sdcard/Download/suoha-plus/suoha-manager.sh"
+SRC="${1:-$SUOHA_SRC}"
 extract() {
     awk -v name="$1" '
         $0 ~ "^" name "\\(\\) *\\{" { inside = 1 }
@@ -23,7 +23,7 @@ extract() {
         inside && /^\}/ { exit }
     ' "$SRC"
 }
-for f in net_hint_begin net_hint_end xray_latest_version cloudflared_latest_version sq_latest_version; do
+for f in net_hint_begin net_hint_end gh_latest_tag xray_latest_version cloudflared_latest_version sq_latest_version; do
     eval "$(extract "$f")"
 done
 echo "XRAY=[$(xray_latest_version 2>/tmp/e1.txt)]"
@@ -32,7 +32,7 @@ echo "SQ=[$(sq_latest_version 2>/tmp/e3.txt)]"
 INNER
 
 echo "===== 1. 非 tty：三个查询都要成功且无 ESC ====="
-bash /tmp/vq.sh
+export SUOHA_SRC="$SRC"; bash /tmp/vq.sh
 for f in /tmp/e1.txt /tmp/e2.txt /tmp/e3.txt; do
     if grep -q $'\033' "$f" 2>/dev/null; then
         bad "$(basename $f) 含 ESC 控制字符"
@@ -82,7 +82,7 @@ fi
 
 echo
 echo "===== 4. 三个查询都返回了版本号（从第 1 节的非 tty 运行结果取）====="
-bash /tmp/vq.sh > /tmp/vq_result.txt 2>/dev/null
+export SUOHA_SRC="$SRC"; bash /tmp/vq.sh > /tmp/vq_result.txt 2>/dev/null
 grep -E 'XRAY=|CF=|SQ=' /tmp/vq_result.txt | sed 's/^/  /'
 if grep -qE 'XRAY=\[v[0-9]' /tmp/vq_result.txt; then ok "Xray 版本获取成功"; else bad "Xray 版本获取失败"; fi
 if grep -qE 'CF=\[[0-9]{4}\.' /tmp/vq_result.txt; then ok "cloudflared 版本获取成功"; else bad "cloudflared 版本获取失败"; fi

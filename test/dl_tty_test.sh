@@ -2,7 +2,7 @@
 # 用 script(1) 伪造 tty，真实跑一次 dl_run，观察进度条是否原地刷新。
 # 只下载一个 18KB 的 README，不需要 root、不碰系统目录。
 
-SRC="${1:-/sdcard/Download/suoha-plus/suoha-manager.sh}"
+SRC="${1:-$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/suoha-manager.sh}"
 WORK="$(mktemp -d /tmp/dltty.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 

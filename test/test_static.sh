@@ -30,7 +30,8 @@ echo "待测：$S"
 echo "[版本]"
 VER=$(sed -n 's/^APP_VERSION="\(.*\)"/\1/p' "$S" | head -n 1)
 check "APP_VERSION 存在" test -n "$VER"
-check "APP_VERSION 为 2.6.3" test "$VER" = "2.6.3"
+# 版本号不写死：只要是 x.y.z 形式即可，避免每次发版都要改测试。
+check "APP_VERSION 格式合法" sh -c "echo '$VER' | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'"
 check "README 版本记录含 v2.6.3" grep -qF 'v2.6.3' "$REPO/README.md"
 VERREADME=$(grep -oE "v$VER" "$REPO/README.md" | head -n 1)
 check "README 与脚本版本一致" test "$VERREADME" = "v$VER"

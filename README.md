@@ -6,7 +6,7 @@
 
 <p>Reality 直连 · Cloudflare Tunnel · ShadowQuic —— 三条链路，一条命令</p>
 
-[![Version](https://img.shields.io/badge/version-v2.6.3-2ea44f?style=for-the-badge)](https://github.com/zhangweixy666/suoha-plus)
+[![Version](https://img.shields.io/badge/version-v2.6.4-2ea44f?style=for-the-badge)](https://github.com/zhangweixy666/suoha-plus)
 [![Platform](https://img.shields.io/badge/platform-Debian%20%7C%20Ubuntu%20%7C%20Alpine-0078d7?style=for-the-badge)](#-系统要求)
 [![Shell](https://img.shields.io/badge/shell-bash%20%2B%20POSIX-4eaa25?style=for-the-badge)](#-系统要求)
 [![License](https://img.shields.io/badge/license-CC--BY--SA--4.0-lightgrey?style=for-the-badge)](#-致谢与许可)
@@ -168,7 +168,7 @@ suoha-plus --help
 
 ```text
 ╔══════════════════════════════════════════════╗
-║  Suoha Plus  v2.6.3                          ║
+║  Suoha Plus  v2.6.4                          ║
 ║  Xray v26.3.27  |  cloudflared 2026.8.2      ║
 ╚══════════════════════════════════════════════╝
 
@@ -410,14 +410,32 @@ sh test/run.sh
 | `test_nohang.sh` | 防卡死回归（stdin 关闭 / 管道输入） |
 | `test_nodes.sh` | 节点生成与重装回归 |
 | `test_uninstall.sh` | 卸载沙箱：验证服务单元清理完整、不误删外部共享资源 |
+| `dl_test.sh` | 下载确认与进度渲染（含 tty 原地刷新） |
+| `dl_tty_test.sh` | 用 script(1) 伪造 tty，验证进度条真实刷新 |
+| `download_audit.sh` | 网络请求点审计：不得有静默下载 |
+| `fix_test.sh` | 历史修复项回归 |
+| `health_probe.sh` | 健康探测 |
+| `vq_test.sh` / `vq_tty2.sh` | 版本查询提示（tty / 非 tty） |
 
-`test/` 下另有专项脚本可单独运行：`dl_test.sh`（下载确认与进度）、`download_audit.sh`（网络请求点审计）、`vq_test.sh` / `vq_tty2.sh`（版本查询提示）、`fix_test.sh`（修复项回归）、`health_probe.sh`（健康探测）。
+**共 14 个套件，`run.sh` 会全部跑完**。测试脚本自动定位仓库内主脚本，也可指定路径：`sh test/run.sh /path/to/suoha-manager.sh`。
 
-测试脚本自动定位仓库内主脚本，也可指定路径：`sh test/run.sh /path/to/suoha-manager.sh`。
+> `dl_tty_test.sh` 需要 `script(1)`（Alpine：`apk add util-linux-misc`；缺少时该项会报错而不是静默通过。
 
 ---
 
 ## 📜 更新日志
+
+### v2.6.4 — 补齐 7 个从未执行的测试套件，并修出 3 个新缺陷
+
+> 起因：v2.6.3 发布后复核发现 `test/run.sh` 只编排了 7 个套件，仓库里另外 7 个脚本**从未被执行过**——它们把源文件路径硬编码成了 `/sdcard/Download/suoha-plus/suoha-manager.sh`（Android 本机路径），在 VPS/CI 上全部报 `No such file`。修好路径后，这批「沉睡」的测试立刻抓出 3 个真问题。
+
+- 🔴 **`validate_common` 的 NODE_ADDRESS 白名单在 busybox/ash 下完全失效**：`case $v in *[!A-Za-z0-9._:\\[\\]-]*)` 这个字符类里混了 `[` 和 `]`，ash 会整体解析失败并**放行一切非法值**（`bad node@#$`、`a b`、`a@b` 全部通过），bash 下却正常。脚本声称支持 POSIX sh，等于在 Alpine 上这道校验形同虚设。改为 `grep -qE '^[]A-Za-z0-9._:[-]+$'`（`]` 放最前、`-` 放最后），两解释器行为一致。
+- 🟠 **GitHub API 60 次/小时配额被打满后，所有版本查询直接失败**：`xray_latest_version` / `cloudflared_latest_version` / `sq_latest_version` 都直连 `api.github.com`，未认证配额仅 60 次/小时且按出口 IP 共享（真机测试中被打满，`x-ratelimit-remaining: 0`）。新增 `gh_latest_tag()`：**优先用 `github.com/<repo>/releases/latest` 的 302 重定向拿 tag，零 API 配额**，失败才回退 API；识别到 403 限流时明确提示「约 N 分钟后恢复」而不是笼统的“网络问题”。
+- 🟡 **`validate_domain` 只校验整串首尾**：`-abc.com`、`abc-.com`、`a..b` 都能通过，但 Cloudflare 会拒绝，用户要等到 `route dns` 那一步才失败。改为逐标签校验（不以 `-` 开头/结尾、非空、≤63 字符、总长 ≤253）。
+
+**测试套件补全**：`run.sh` 从 7 个扩展到 **14 个**，并把被测算脚本路径通过 `SUOHA_SRC` 传给套件内部嵌套的子脚本（此前 heredoc 生成的临时脚本在 `/tmp`，`dirname $0/..` 定位不到仓库）。
+
+**真机验证**（Alpine 3.23.6 / OpenRC / busybox）：Reality 端到端 200、模式切换无残留、回滚后 `state.env` 与基线 diff 为空、卸载无残留、`sh` 下安装 0 个 `invalid format`。
 
 ### v2.6.3 — 二次真机实测：修 9 个实际缺陷（含 2 个 P0）
 

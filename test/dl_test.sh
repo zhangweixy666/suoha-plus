@@ -2,7 +2,7 @@
 # 抽取下载交互相关函数并真实执行，验证确认逻辑与进度渲染。
 # 不安装任何东西、不碰系统目录；只写 /tmp。
 
-SRC="${1:-/sdcard/Download/suoha-plus/suoha-manager.sh}"
+SRC="${1:-$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/suoha-manager.sh}"
 WORK="$(mktemp -d /tmp/dltest.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 

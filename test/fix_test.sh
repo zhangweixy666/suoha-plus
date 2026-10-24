@@ -2,7 +2,7 @@
 # v2.6.0 修复的行为测试：抽真实函数在沙箱执行，不安装、不碰系统目录。
 # 覆盖：Reality 地址生效 / 校验白名单 / 健康检测判定 / Quick 提示 / 版本基址重算。
 
-SRC="${1:-/sdcard/Download/suoha-plus/suoha-manager.sh}"
+SRC="${1:-$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/suoha-manager.sh}"
 WORK="$(mktemp -d /tmp/fixtest.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -221,7 +221,7 @@ if [ "$V" = "v26.3.27" ]; then pass "未设变量时回落到内置版本"; else
 
 echo
 echo "=== 9. 版本持久化字段存在 ==="
-if grep -q "printf 'SUOHA_XRAY_VERSION=%q" "$SRC"; then
+if grep -q 'state_line SUOHA_XRAY_VERSION' "$SRC"; then
     pass "save_state 写入 SUOHA_XRAY_VERSION"
 else
     fail "save_state 未持久化版本"

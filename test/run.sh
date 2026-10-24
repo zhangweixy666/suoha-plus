@@ -25,7 +25,8 @@ run_suite() {
     echo "========================================"
     echo "  运行：$name"
     echo "========================================"
-    if sh "$HERE/$script"; then
+    # 把被测脚本路径传给套件；否则套件内部嵌套的子脚本（vq/dl_tty 等）定位不到源文件。
+    if SUOHA_SRC="$S" SUOHA_TEST_SCRIPT="$S" sh "$HERE/$script"; then
         echo "[通过] $name"
         PASS=$((PASS + 1))
     else
@@ -42,6 +43,13 @@ run_suite "真实行为回归" test_regression.sh
 run_suite "真机安装回归" test_reality_install.sh
 run_suite "防卡死回归" test_nohang.sh
 run_suite "节点与重装回归" test_nodes.sh
+run_suite "下载与进度" dl_test.sh
+run_suite "下载 tty 渲染" dl_tty_test.sh
+run_suite "下载路径审计" download_audit.sh
+run_suite "历史修复回归" fix_test.sh
+run_suite "健康探测" health_probe.sh
+run_suite "版本查询提示" vq_test.sh
+run_suite "版本查询 tty" vq_tty2.sh
 
 echo ""
 echo "========================================"

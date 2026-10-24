@@ -1,6 +1,6 @@
 #!/bin/bash
 # 在真 tty 下直接调用（不重定向 stderr），验证 net_hint 的 \r 与 \033[K 确实发出
-SRC="/sdcard/Download/suoha-plus/suoha-manager.sh"
+SRC="${1:-$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/suoha-manager.sh}"
 
 extract() {
     awk -v name="$1" '

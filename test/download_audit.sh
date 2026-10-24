@@ -1,7 +1,7 @@
 #!/bin/bash
 # 审计：所有网络请求点是否都有"确认 + 可见反馈"
 # 不是靠读代码猜，而是把每个函数抽出来实际跑一遍，看 stderr 有没有输出。
-SRC="/sdcard/Download/suoha-plus/suoha-manager.sh"
+SRC="${1:-$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/suoha-manager.sh}"
 PASS=0; FAIL=0
 ok() { echo "ok  : $*"; PASS=$((PASS+1)); }
 bad() { echo "FAIL: $*"; FAIL=$((FAIL+1)); }
@@ -90,7 +90,7 @@ echo
 echo "[5] 版本查询：实际跑一遍看 stderr 有无提示"
 cat > /tmp/audit_vq.sh <<'INNER'
 #!/bin/bash
-SRC="/sdcard/Download/suoha-plus/suoha-manager.sh"
+SRC="${1:-$SUOHA_SRC}"
 extract() {
     awk -v name="$1" '
         $0 ~ "^" name "\\(\\) *\\{" { inside = 1 }
@@ -98,7 +98,7 @@ extract() {
         inside && /^\}/ { exit }
     ' "$SRC"
 }
-for f in net_hint_begin net_hint_end xray_latest_version cloudflared_latest_version sq_latest_version; do
+for f in net_hint_begin net_hint_end gh_latest_tag xray_latest_version cloudflared_latest_version sq_latest_version; do
     eval "$(extract "$f")"
 done
 xray_latest_version > /dev/null
@@ -106,7 +106,7 @@ cloudflared_latest_version > /dev/null
 sq_latest_version > /dev/null
 INNER
 
-bash /tmp/audit_vq.sh 2>/tmp/audit_stderr.txt
+SUOHA_SRC="$SRC" bash /tmp/audit_vq.sh 2>/tmp/audit_stderr.txt
 LINES=$(grep -c '正在查询' /tmp/audit_stderr.txt)
 if [ "$LINES" -eq 3 ]; then
     ok "三个版本查询都有可见提示（3/3）"
@@ -144,7 +144,11 @@ fi
 # ---------- 8. 全局：不该有静默下载 ----------
 echo
 echo "[8] 全局扫描：是否还有静默下载残留"
-if grep -qE 'curl [^|]*(-o|--output)[^|]*2>/dev/null' "$SRC"; then
+# 排除“探测类” curl：-o /dev/null、-D - 只取响应头、以及 API 查询，
+# 这些本来就不需要进度条。真正要拓的是“下载到真实文件却全程安静”。
+if grep -nE 'curl [^|]*(-o|--output)[^|]*2>/dev/null' "$SRC" \
+   | grep -vE '/dev/null|-D -|-D-' \
+   | grep -q .; then
     bad "仍有 curl 下载重定向到 /dev/null"
     grep -nE 'curl [^|]*(-o|--output)[^|]*2>/dev/null' "$SRC" | sed 's/^/    /'
 else

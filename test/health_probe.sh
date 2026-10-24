@@ -1,6 +1,6 @@
 #!/bin/bash
 # 验证 health_check 里的状态码提取逻辑（用真实 curl 输出，不启动服务）。
-SRC="${1:-/sdcard/Download/suoha-plus/suoha-manager.sh}"
+SRC="${1:-$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/suoha-manager.sh}"
 
 echo "1) 真实 404 响应 → 提取状态码"
 H="$(curl -s -o /dev/null -D - --max-time 10 --http1.1 \
