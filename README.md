@@ -9,6 +9,7 @@
 [![Version](https://img.shields.io/badge/version-v2.6.4-2ea44f?style=for-the-badge)](https://github.com/zhangweixy666/suoha-plus)
 [![Platform](https://img.shields.io/badge/platform-Debian%20%7C%20Ubuntu%20%7C%20Alpine-0078d7?style=for-the-badge)](#-系统要求)
 [![Shell](https://img.shields.io/badge/shell-bash%20%2B%20POSIX-4eaa25?style=for-the-badge)](#-系统要求)
+[![Tests](https://img.shields.io/badge/tests-14%20suites-2ea44f?style=for-the-badge)](#-测试)
 [![License](https://img.shields.io/badge/license-CC--BY--SA--4.0-lightgrey?style=for-the-badge)](#-致谢与许可)
 
 <p><b>无需域名 · 无需证书 · 无需付费 · 中文菜单</b></p>
@@ -133,6 +134,10 @@ suoha-plus --help
 | ⚙️ 配置透明 | 菜单内直接查看路径，支持 vi/vim/nano 编辑，保存后自动校验 + 重启 + 刷新节点 |
 | 🗑 精准卸载 | 可单独删 Xray / 单独删 Tunnel / ShadowQuic / 全部，**不影响系统其他组件** |
 | 🔐 完整性校验 | Xray 下载走官方 `.dgst` SHA-256 校验，ShadowQuic 做 ELF 魔数 + 真实执行验证 |
+| 🔢 零配额版本查询 | 优先走 `releases/latest` 的 302 重定向拿 tag，不消耗 GitHub API 的 60 次/小时配额，失败才回退 API |
+| 🧮 POSIX 全兼容 | `bash` 与 busybox `sh`（Alpine 默认）行为一致：状态文件用自研 `shquote` 转义，不依赖 `printf %q` |
+| 📜 日志轮转 | 主菜单每次刷新自动轮转，长期运行不会把磁盘写满 |
+| 🧪 14 个测试套件 | 静态 / 行为 / 卸载 / 回归 / 防卡死 / 节点 / 下载 / 健康 / 版本查询全覆盖，`sh test/run.sh` 一条命令跑完 |
 | 🇨🇳 中文界面 | 菜单、状态、错误提示全中文 |
 
 ---
@@ -302,6 +307,8 @@ bash /root/suoha-plus-managed.sh
 |:---|:---|
 | 系统 | Debian / Ubuntu / Alpine（及其他 systemd / OpenRC 发行版） |
 | 架构 | x86_64 / aarch64 / armv7 / i686 |
+| Shell | `bash` 或 POSIX `sh`（busybox ash 已真机实测，两条解释器路径行为一致） |
+| init | systemd（Debian/Ubuntu）或 OpenRC（Alpine） |
 | 权限 | root |
 | 网络 | 独立 IPv4、NAT、仅 IPv6 机器均可 |
 | 依赖 | `curl` 或 `wget`、`tar`、`unzip`（脚本会自动检查并询问是否安装） |
@@ -371,9 +378,41 @@ Xray：菜单 `5 → 4` 编辑保存即自动校验重启；ShadowQuic：菜单 
 </details>
 
 <details>
+<summary><b>GitHub API 限流了，版本检查是不是就废了？</b></summary>
+
+不会。未认证的 GitHub API 配额只有 60 次/小时且按出口 IP 共享，真机测试中确实被打满过（`x-ratelimit-remaining: 0`）。
+
+从 v2.6.4 起新增 `gh_latest_tag()`：**优先用 `github.com/<repo>/releases/latest` 的 302 重定向直接拿 tag，零 API 配额**，失败才回退到 API；识别到 403 限流时会明确提示「约 N 分钟后恢复」，而不是笼统地说「网络问题」。
+
+</details>
+
+<details>
+<summary><b>Alpine 上必须装 bash 吗？</b></summary>
+
+不必须。脚本声明支持 POSIX `sh`，v2.6.3 专门修了 busybox/musl 的兼容问题：
+
+- busybox 的 `printf` 不支持 `%q`，21 处 `printf 'KEY=%q'` 会把 `state.env` 写成一行垃圾 → 改用自研 `shquote()` / `state_line()` 做 POSIX 单引号转义
+- `case` 的字符类里混入 `[` `]` 会让 ash 整体解析失败并**放行一切非法值** → 改用 `grep -qE`，bash/ash 行为一致
+
+v2.6.3/v2.6.4 的全部验证均在 Alpine 3.23.6 + OpenRC + busybox 真机上完成。
+
+</details>
+
+<details>
+<summary><b>装完之后日志会不会把磁盘写满？</b></summary>
+
+不会。`rotate_all_logs()` 现已挂到主菜单循环里，每次刷新主菜单都会检查并轮转。
+
+> 这个函数曾经是**死代码**——写好了但从未被调用，日志会无限增长。v2.6.3 把它接回了主菜单。
+
+</details>
+
+<details>
 <summary><b>安装失败会不会把正在用的节点搞挂？</b></summary>
 
-不会。v2.6.2 起安装走事务流程（`txn_begin / txn_commit / txn_rollback`）：先完成所有可能失败的步骤（下载 / 密钥 / 校验 / 写配置），最后才动服务；任一步失败即还原配置、重建服务单元并重新拉起原服务。
+不会。安装走事务流程（`txn_begin / txn_commit / txn_rollback`）：先完成所有可能失败的步骤（下载 / 密钥 / 校验 / 写配置），最后才动服务；任一步失败即还原配置、重建服务单元并重新拉起原服务。
+
+> v2.6.3 又修掉了两个更隐蔽的问题：**快照时机**（原先在「问完参数之后」才 `txn_begin`，快照里存的已经是用户刚填的非法值，回滚等于把坏值写回去 → 现已前移到读输入之前）和**回滚误写状态文件**（新增 `_txn_restart_services()`，回滚只重启服务、不再回写 `state.env`）。
 
 </details>
 
@@ -417,7 +456,11 @@ sh test/run.sh
 | `health_probe.sh` | 健康探测 |
 | `vq_test.sh` / `vq_tty2.sh` | 版本查询提示（tty / 非 tty） |
 
-**共 14 个套件，`run.sh` 会全部跑完**。测试脚本自动定位仓库内主脚本，也可指定路径：`sh test/run.sh /path/to/suoha-manager.sh`。
+**共 14 个套件，`run.sh` 会全部跑完**，任一失败即整体退出码非 0，可直接接 CI。
+
+> 🧪 v2.6.4 之前，`run.sh` 只编排了 7 个套件，另外 7 个脚本**从未被执行过** —— 它们把源文件路径硬编码成了 Android 本机路径，在 VPS/CI 上全部报 `No such file`。修好路径后，这批「沉睡」的测试立刻抓出 3 个真缺陷（见[更新日志](#-更新日志)）。现在 `run.sh` 通过 `SUOHA_SRC` 把被测脚本路径传给套件内部嵌套的子脚本，避免同类问题复发。
+
+测试脚本自动定位仓库内主脚本，也可指定路径：`sh test/run.sh /path/to/suoha-manager.sh`。
 
 > `dl_tty_test.sh` 需要 `script(1)`（Alpine：`apk add util-linux-misc`；缺少时该项会报错而不是静默通过。
 
@@ -426,6 +469,8 @@ sh test/run.sh
 ## 📜 更新日志
 
 ### v2.6.4 — 补齐 7 个从未执行的测试套件，并修出 3 个新缺陷
+
+**一句话总结**：`run.sh` 从 7 个套件扩到 **14 个**；修掉 busybox 下形同虚设的输入校验、GitHub API 配额打满即失效的版本查询、以及只校验首尾的域名校验。
 
 > 起因：v2.6.3 发布后复核发现 `test/run.sh` 只编排了 7 个套件，仓库里另外 7 个脚本**从未被执行过**——它们把源文件路径硬编码成了 `/sdcard/Download/suoha-plus/suoha-manager.sh`（Android 本机路径），在 VPS/CI 上全部报 `No such file`。修好路径后，这批「沉睡」的测试立刻抓出 3 个真问题。
 
