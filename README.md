@@ -1,5 +1,7 @@
 <div align="center">
 
+<a id="top"></a>
+
 <h1>🍍 Suoha Plus</h1>
 
 <p><b>Xray 多模式节点一键管理脚本</b></p>
@@ -12,11 +14,37 @@
 [![Tests](https://img.shields.io/badge/tests-14%20suites-2ea44f?style=for-the-badge)](#-测试)
 [![License](https://img.shields.io/badge/license-CC--BY--SA--4.0-lightgrey?style=for-the-badge)](#-致谢与许可)
 
-<p><b>无需域名 · 无需证书 · 无需付费 · 中文菜单</b></p>
+**无需域名 · 无需证书 · 无需付费 · 中文菜单**
 
-[🚀 快速开始](#-快速开始)　·　[🎯 三种模式怎么选](#-三种模式怎么选)　·　[✨ 功能特性](#-功能特性)　·　[❓ 常见问题](#-常见问题)　·　[📜 更新日志](#-更新日志)
+[⚡ 30 秒上手](#-30-秒上手)　·　[🎯 三种模式怎么选](#-三种模式怎么选)　·　[✨ 功能特性](#-功能特性)　·　[📦 使用指南](#-使用指南)　·　[❓ 常见问题](#-常见问题)　·　[📜 更新日志](#-更新日志)
 
 </div>
+
+---
+
+## ⚡ 30 秒上手
+
+```bash
+wget -qO- https://raw.githubusercontent.com/zhangweixy666/suoha-plus/main/suoha-manager.sh | sh
+```
+
+脚本会自动下载副本到 `/root/suoha-plus-managed.sh`，并以真实 TTY 交互模式重新启动，菜单正常可用。
+
+下载后运行（想看清脚本内容时用）：
+
+```bash
+wget -qO /root/suoha-manager.sh https://raw.githubusercontent.com/zhangweixy666/suoha-plus/main/suoha-manager.sh \
+  && chmod +x /root/suoha-manager.sh \
+  && bash /root/suoha-manager.sh
+```
+
+装完之后：
+
+```bash
+suoha-plus            # 随时唤回管理菜单
+suoha-plus --version  # 查看版本
+suoha-plus --help     # 查看帮助
+```
 
 ---
 
@@ -32,58 +60,6 @@
 | **ShadowQuic**（可选模块） | ❌ | ❌ | 🟢 固定 `UDP:1443` | 低 | 想要 0-RTT 握手、UDP 线路好 |
 
 > 💡 **小孩子才做选择。** Reality 与 WS 隧道可以**同时运行、互为备份**，一次安装输出两套节点链接。
-
----
-
-## 🚀 快速开始
-
-### 一键运行（推荐）
-
-```bash
-wget -qO- https://raw.githubusercontent.com/zhangweixy666/suoha-plus/main/suoha-manager.sh | sh
-```
-
-脚本会自动下载副本到 `/root/suoha-plus-managed.sh`，并以真实 TTY 交互模式重新启动，菜单正常可用。
-
-### 下载后运行
-
-```bash
-wget -qO /root/suoha-manager.sh https://raw.githubusercontent.com/zhangweixy666/suoha-plus/main/suoha-manager.sh
-chmod +x /root/suoha-manager.sh
-bash /root/suoha-manager.sh
-```
-
-### 装完之后
-
-```bash
-suoha-plus          # 随时唤回管理菜单
-suoha-plus --version
-suoha-plus --help
-```
-
----
-
-## 📖 目录
-
-- [🎯 三种模式怎么选](#-三种模式怎么选)
-- [🚀 快速开始](#-快速开始)
-- [✨ 功能特性](#-功能特性)
-- [🏗 工作原理](#-工作原理)
-- [🖥 主菜单预览](#-主菜单预览)
-- [📦 使用指南](#-使用指南)
-  - [Reality 直连节点](#reality-直连节点菜单-3推荐)
-  - [Quick Tunnel](#quick-tunnel菜单-1)
-  - [持久化 Tunnel](#持久化-tunnel菜单-2)
-  - [ShadowQuic 模块](#shadowquic-模块菜单-8)
-- [📄 节点文件](#-节点文件)
-- [⚙ 配置文件](#-配置文件)
-- [🧰 服务管理](#-服务管理)
-- [🧩 系统要求](#-系统要求)
-- [❓ 常见问题](#-常见问题)
-- [🧹 卸载](#-卸载)
-- [🧪 测试](#-测试)
-- [📜 更新日志](#-更新日志)（完整历史见 [CHANGELOG.md](CHANGELOG.md)）
-- [🙏 致谢与许可](#-致谢与许可)
 
 ---
 
@@ -270,8 +246,8 @@ sq://用户名:密码@IPv4:1443?alpn=h3&mtu=1280&sni=www.apple.com&udp_mode=data
 ## 🧰 服务管理
 
 ```bash
-suoha-plus                  # 打开管理菜单
-bash /root/suoha-plus-managed.sh
+suoha-plus                     # 打开管理菜单
+bash /root/suoha-plus-managed.sh  # 直接跑已下载的副本
 ```
 
 服务菜单支持启动 / 停止 / 重启（自动刷新节点）/ 查看节点信息。
@@ -286,6 +262,8 @@ bash /root/suoha-plus-managed.sh
 └── bin/           # 固定版本二进制
 ```
 
+**版本策略**：固定版本是刻意设计（可复现、不受上游更新影响），但提供两条升级通道 —— 环境变量覆盖（`SUOHA_XRAY_VERSION=vXX.X.XX ./suoha-manager.sh`）或菜单 `9) 组件版本` 检查并升级（写入 `state.env`）。
+
 ---
 
 ## 🧩 系统要求
@@ -298,6 +276,42 @@ bash /root/suoha-plus-managed.sh
 | 权限 | root |
 | 网络 | 独立 IPv4、NAT、仅 IPv6 机器均可 |
 | 依赖 | `curl` 或 `wget`、`tar`、`unzip`（脚本会自动检查并询问是否安装） |
+
+---
+
+## 🧪 测试
+
+仓库自带测试套件，**无需 root，不影响本机已有的 Suoha Plus 安装**：
+
+```bash
+sh test/run.sh
+```
+
+指定主脚本路径：
+
+```bash
+sh test/run.sh /path/to/suoha-manager.sh
+```
+
+| 套件 | 作用 |
+|:---|:---|
+| `test_static.sh` | 静态断言：版本一致性、修复特征存在、原有特性未回归 |
+| `test_behavior.sh` | 行为测试：提取真实函数到沙箱执行，验证架构映射、IP 缓存、日志轮转等 |
+| `test_regression.sh` | 真实行为回归 |
+| `test_reality_install.sh` | 真机安装回归 |
+| `test_nohang.sh` | 防卡死回归（stdin 关闭 / 管道输入） |
+| `test_nodes.sh` | 节点生成与重装回归 |
+| `test_uninstall.sh` | 卸载沙箱：验证服务单元清理完整、不误删外部共享资源 |
+| `dl_test.sh` | 下载确认与进度渲染（含 tty 原地刷新） |
+| `dl_tty_test.sh` | 用 script(1) 伪造 tty，验证进度条真实刷新 |
+| `download_audit.sh` | 网络请求点审计：不得有静默下载 |
+| `fix_test.sh` | 历史修复项回归 |
+| `health_probe.sh` | 健康探测 |
+| `vq_test.sh` / `vq_tty2.sh` | 版本查询提示（tty / 非 tty） |
+
+**共 14 个套件，`run.sh` 全部跑完**，任一失败即退出码非 0，可直接接 CI。
+
+> `dl_tty_test.sh` 需要 `script(1)`（Alpine：`apk add util-linux-misc`；缺少时该项会报错而不是静默通过。
 
 ---
 
@@ -400,36 +414,6 @@ v2.6.3/v2.6.4 的全部验证均在 Alpine 3.23.6 + OpenRC + busybox 真机上�
 
 ---
 
-## 🧪 测试
-
-仓库自带测试套件，**无需 root，不影响本机已有的 Suoha Plus 安装**：
-
-```bash
-sh test/run.sh
-```
-
-| 套件 | 作用 |
-|:---|:---|
-| `test_static.sh` | 静态断言：版本一致性、修复特征存在、原有特性未回归 |
-| `test_behavior.sh` | 行为测试：提取真实函数到沙箱执行，验证架构映射、IP 缓存、日志轮转等 |
-| `test_regression.sh` | 真实行为回归 |
-| `test_reality_install.sh` | 真机安装回归 |
-| `test_nohang.sh` | 防卡死回归（stdin 关闭 / 管道输入） |
-| `test_nodes.sh` | 节点生成与重装回归 |
-| `test_uninstall.sh` | 卸载沙箱：验证服务单元清理完整、不误删外部共享资源 |
-| `dl_test.sh` | 下载确认与进度渲染（含 tty 原地刷新） |
-| `dl_tty_test.sh` | 用 script(1) 伪造 tty，验证进度条真实刷新 |
-| `download_audit.sh` | 网络请求点审计：不得有静默下载 |
-| `fix_test.sh` | 历史修复项回归 |
-| `health_probe.sh` | 健康探测 |
-| `vq_test.sh` / `vq_tty2.sh` | 版本查询提示（tty / 非 tty） |
-
-**共 14 个套件，`run.sh` 全部跑完**，任一失败即退出码非 0，可直接接 CI。测试脚本自动定位仓库内主脚本，也可指定路径：`sh test/run.sh /path/to/suoha-manager.sh`。
-
-> `dl_tty_test.sh` 需要 `script(1)`（Alpine：`apk add util-linux-misc`；缺少时该项会报错而不是静默通过。
-
----
-
 ## 📜 更新日志
 
 > 完整历史见 [**CHANGELOG.md**](CHANGELOG.md)。这里只保留最近三个版本的摘要。
@@ -455,6 +439,16 @@ sh test/run.sh
 
 ---
 
+## 🔗 相关项目
+
+| 项目 | 定位 |
+|:---|:---|
+| [**warp-**](https://github.com/zhangweixy666/warp-) | Alpine 专用：warp-go + ShadowQuic + sing-box 一键部署，本项目的 ShadowQuic 部署逻辑来源 |
+| [**-singbox1.3.x-vless-anytls**](https://github.com/zhangweixy666/-singbox1.3.x-vless-anytls) | sing-box 六协议 + Cloudflare Tunnel 全流程管理 |
+| [**dns-setup**](https://github.com/zhangweixy666/dns-setup) | VPS DNS 自动配置，AKDNS 测速 + 六层 DHCP 防覆盖 |
+
+---
+
 ## 🙏 致谢与许可
 
 本项目由 [suoha.sh](https://suoha.psai.eu.org/suoha.sh) 增强分支开发而来，重构并扩展了 Reality、ShadowQuic、健康检测等功能。使用独立目录与服务名，**不影响、也不调用原脚本**。
@@ -468,7 +462,7 @@ sh test/run.sh
 
 <div align="center">
 
-**[⬆ 回到顶部](#-suoha-plus)**
+**[⬆ 回到顶部](#top)**
 
 Made with 🍍 by [zhangweixy666](https://github.com/zhangweixy666)
 
